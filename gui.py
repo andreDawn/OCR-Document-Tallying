@@ -1,4 +1,4 @@
-"""Tkinter desktop UI: drag-and-drop, full Thai UI switching, recent history, and box-highlighted auditing."""
+"""Tkinter desktop UI: drag-and-drop, full Thai UI switching, recent history, box-highlighted auditing, and Dawn Shipping branding."""
 
 from __future__ import annotations
 
@@ -27,13 +27,23 @@ except ImportError:
 
 UI_TEXT = {
     "en": {
-        "app_title": "Logistics PDF Auditor",
+        "app_title": "Logistics PDF Auditor - Dawn Shipping (Thailand)",
         "header_title": "Logistics PDF Auditor",
         "recent_btn": "📂 View Recent Audits",
         "new_btn": "➕ New Audit",
-        "hint": "Drop PDF files (CI, PL, BL, CO) below or click 'New Audit'. Pages are flattened to 300 DPI JPEGs and cross-checked against Google Sheets Consignee Master DB.",
+        "about_btn": "ℹ️ About",
+        "about_title": "About Logistics PDF Auditor",
+        "about_body": (
+            "Logistics PDF Auditor v1.0.0\n\n"
+            "Company: Dawn Shipping (Thailand) Co., Ltd.\n"
+            "Contact & Support: Andre Lim (andrelim@dawnsg.com)\n"
+            "Engine: Gemini Multimodal Vision Pipeline\n\n"
+            "Internal Company Property • Unauthorized distribution strictly prohibited."
+        ),
+        "hint": "Drop PDF files (CI, PL, BL, CO) below or click 'New Audit'. Pages are flattened to 300 DPI JPEGs and cross-checked against the Consignee Master DB.",
         "drop_zone": "Drag and drop PDF files here\n\nor click 'New Audit' above",
         "chk_thai": "Use Thai Language UI (ใช้งานภาษาไทย)",
+        "company_footer": "Dawn Shipping (Thailand) Co., Ltd. • Support: andrelim@dawnsg.com",
         "ready": "Ready. Drop PDFs or click 'New Audit'.",
         "busy_title": "Busy",
         "busy_msg": "A job is already running. Please wait.",
@@ -68,13 +78,23 @@ UI_TEXT = {
         "watermark_label": "⚠️ Watermark Warning:",
     },
     "th": {
-        "app_title": "ระบบตรวจสอบเอกสารโลจิสติกส์ (Logistics PDF Auditor)",
+        "app_title": "ระบบตรวจสอบเอกสารโลจิสติกส์ - Dawn Shipping (Thailand)",
         "header_title": "ระบบตรวจสอบเอกสารโลจิสติกส์",
         "recent_btn": "📂 ดูรายงานย้อนหลัง",
         "new_btn": "➕ ตรวจสอบเอกสารใหม่",
-        "hint": "ลากไฟล์ PDF (CI, PL, BL, CO) มาวางด้านล่าง หรือคลิก 'ตรวจสอบเอกสารใหม่' ระบบจะแปลงไฟล์เป็นรูปภาพ 300 DPI และเปรียบเทียบข้อมูลกับฐานข้อมูลหลักใน Google Sheets",
+        "about_btn": "ℹ️ เกี่ยวกับระบบ",
+        "about_title": "เกี่ยวกับระบบตรวจสอบเอกสาร",
+        "about_body": (
+            "ระบบตรวจสอบเอกสารโลจิสติกส์ v1.0.0\n\n"
+            "พัฒนาสำหรับ: บริษัท ดอว์น ชิปปิ้ง (ประเทศไทย) จำกัด\n"
+            "ผู้ดูแลและประสานงาน: Andre Lim (andrelim@dawnsg.com)\n"
+            "ระบบประมวลผล: Gemini Multimodal Vision Pipeline\n\n"
+            "สงวนลิขสิทธิ์ • สำหรับการใช้งานภายในองค์กรเท่านั้น"
+        ),
+        "hint": "ลากไฟล์ PDF (CI, PL, BL, CO) มาวางด้านล่าง หรือคลิก 'ตรวจสอบเอกสารใหม่' ระบบจะแปลงไฟล์เป็นรูปภาพ 300 DPI และเปรียบเทียบข้อมูลกับฐานข้อมูลหลัก",
         "drop_zone": "ลากและวางไฟล์ PDF ที่นี่\n\nหรือคลิก 'ตรวจสอบเอกสารใหม่' ด้านบน",
         "chk_thai": "ใช้งานภาษาไทยทั้งระบบ (Thai Language UI)",
+        "company_footer": "บริษัท ดอว์น ชิปปิ้ง (ประเทศไทย) จำกัด • ติดต่อฝ่ายสนับสนุน: andrelim@dawnsg.com",
         "ready": "พร้อมใช้งาน: ลากไฟล์ PDF มาวาง หรือคลิก 'ตรวจสอบเอกสารใหม่'",
         "busy_title": "ระบบกำลังทำงาน",
         "busy_msg": "กำลังประมวลผลงานก่อนหน้า กรุณารอสักครู่",
@@ -144,8 +164,8 @@ class LogisticsAuditorApp:
 
     def __init__(self) -> None:
         self.root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
-        self.root.geometry("800x540")
-        self.root.minsize(720, 460)
+        self.root.geometry("820x560")
+        self.root.minsize(740, 480)
 
         self.status = StringVar()
         self.use_thai = BooleanVar(value=False)
@@ -175,12 +195,15 @@ class LogisticsAuditorApp:
         nav_frame.pack(side=tk.RIGHT)
 
         self.recent_btn = ttk.Button(nav_frame, command=self._show_recent_audits)
-        self.recent_btn.pack(side=tk.LEFT, padx=4)
+        self.recent_btn.pack(side=tk.LEFT, padx=3)
 
         self.new_btn = ttk.Button(nav_frame, command=self._browse_files)
-        self.new_btn.pack(side=tk.LEFT, padx=4)
+        self.new_btn.pack(side=tk.LEFT, padx=3)
 
-        self.hint_label = ttk.Label(frame, wraplength=740)
+        self.about_btn = ttk.Button(nav_frame, command=self._show_about_dialog)
+        self.about_btn.pack(side=tk.LEFT, padx=3)
+
+        self.hint_label = ttk.Label(frame, wraplength=760)
         self.hint_label.pack(anchor=tk.W, pady=(0, 10))
 
         self.drop_zone = tk.Label(
@@ -193,10 +216,10 @@ class LogisticsAuditorApp:
             fg="#333333",
             font=("Segoe UI", 11),
         )
-        self.drop_zone.pack(fill=tk.BOTH, expand=True, pady=8)
+        self.drop_zone.pack(fill=tk.BOTH, expand=True, pady=6)
 
         options_row = ttk.Frame(frame)
-        options_row.pack(fill=tk.X, pady=6)
+        options_row.pack(fill=tk.X, pady=4)
 
         self.chk_thai = ttk.Checkbutton(
             options_row,
@@ -208,18 +231,32 @@ class LogisticsAuditorApp:
         ttk.Label(
             frame,
             textvariable=self.status,
-            wraplength=740,
+            wraplength=760,
             font=("Segoe UI", 9, "italic"),
-        ).pack(anchor=tk.W, pady=(8, 0))
+        ).pack(anchor=tk.W, pady=(6, 2))
+
+        # Bottom company signature
+        self.footer_label = ttk.Label(
+            frame,
+            font=("Segoe UI", 8),
+            foreground="#64748b",
+            anchor=tk.CENTER,
+        )
+        self.footer_label.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
+
+    def _show_about_dialog(self) -> None:
+        messagebox.showinfo(self._t("about_title"), self._t("about_body"))
 
     def _update_ui_language(self) -> None:
         self.root.title(self._t("app_title"))
         self.title_label.config(text=self._t("header_title"))
         self.recent_btn.config(text=self._t("recent_btn"))
         self.new_btn.config(text=self._t("new_btn"))
+        self.about_btn.config(text=self._t("about_btn"))
         self.hint_label.config(text=self._t("hint"))
         self.drop_zone.config(text=self._t("drop_zone"))
         self.chk_thai.config(text=self._t("chk_thai"))
+        self.footer_label.config(text=self._t("company_footer"))
 
         if not self._busy:
             self.status.set(self._t("ready"))
