@@ -1,0 +1,23 @@
+# Environment & secrets
+.env
+
+# Block bg-remover folder completely
+bg-remover/
+
+# Build outputs & executables anywhere
+dist/
+build/
+**/dist/
+**/build/
+*.exe
+*.pkg
+*.spec
+
+# Python cache & virtual environment
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local processing outputs
+output/
