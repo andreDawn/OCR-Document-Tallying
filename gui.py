@@ -1,7 +1,6 @@
-"""Tkinter desktop UI: drag-and-drop, full Thai UI switching, recent history, box-highlighted auditing, and Dawn Shipping branding."""
+"""Tkinter desktop UI: 18-field auditing, live reconciliation highlighting, and Thai toggling."""
 
 from __future__ import annotations
-from updater import CURRENT_VERSION, check_for_updates, apply_update_and_restart
 
 import json
 import re
@@ -77,12 +76,6 @@ UI_TEXT = {
         "summary_title": " Discrepancy Summary & Notes ",
         "no_discrepancy": "All checked data points match.",
         "watermark_label": "⚠️ Watermark Warning:",
-
-        # In UI_TEXT["en"]:
-        "update_btn": "🔄 Update Available ({ver})",
-        "update_prompt_title": "Update Logistics Auditor",
-        "update_prompt_msg": "A new version ({ver}) is ready. Update and restart now?",
-        "updating_status": "Downloading update {pct}%...",
     },
     "th": {
         "app_title": "ระบบตรวจสอบเอกสารโลจิสติกส์ - Dawn Shipping (Thailand)",
@@ -134,46 +127,73 @@ UI_TEXT = {
         "summary_title": " สรุปข้อขัดแย้งและบันทึกเพิ่มเติม (Discrepancy Summary) ",
         "no_discrepancy": "ข้อมูลตรงกันทุกรายการ ไม่พบข้อขัดแย้ง",
         "watermark_label": "⚠️ คำเตือนลายน้ำ:",
-
-        # In UI_TEXT["th"]:
-        "update_btn": "🔄 มีเวอร์ชันใหม่ ({ver})",
-        "update_prompt_title": "อัปเดตระบบตรวจสอบเอกสาร",
-        "update_prompt_msg": "พบเวอร์ชันใหม่ ({ver}) ต้องการดาวน์โหลดและเปิดโปรแกรมใหม่ทันทีหรือไม่?",
-        "updating_status": "กำลังดาวน์โหลดอัปเดต {pct}%...",
     },
 }
 
-THAI_FIELD_MAP = {
-    "shipper": "1. ชื่อและที่อยู่ผู้ส่งสินค้า (Shipper)",
-    "exporter": "1. ชื่อและที่อยู่ผู้ส่งสินค้า (Shipper)",
-    "consignee name": "2. ชื่อผู้รับตราส่ง (Consignee Name)",
-    "consignee address": "3. ที่อยู่ผู้รับตราส่ง (Consignee Address)",
-    "notify": "4. ผู้รับแจ้ง (Notify Party)",
-    "document": "5. เลขที่เอกสารอ้างอิง (Doc No.)",
-    "reference": "5. เลขที่เอกสารอ้างอิง (Doc No.)",
-    "date": "6. วันที่เอกสาร (Doc Date)",
-    "description": "7. รายการสินค้า (Description of Goods)",
-    "goods": "7. รายการสินค้า (Description of Goods)",
-    "quantity": "8. จำนวนและลักษณะหีบห่อ (Qty & Packages)",
-    "packages": "8. จำนวนและลักษณะหีบห่อ (Qty & Packages)",
-    "net weight": "9. น้ำหนักสุทธิ (Net Weight - NW)",
-    "nw": "9. น้ำหนักสุทธิ (Net Weight - NW)",
-    "gross weight": "10. น้ำหนักรวม (Gross Weight - GW)",
-    "gw": "10. น้ำหนักรวม (Gross Weight - GW)",
-    "volume": "11. ปริมาตรสินค้า (Volume - CBM)",
-    "cbm": "11. ปริมาตรสินค้า (Volume - CBM)",
-    "hs code": "12. พิกัดอัตราศุลกากร (HS Code)",
-    "unit price": "13. ราคาต่อหน่วยและยอดรวม (Price & Amount)",
-    "amount": "13. ราคาต่อหน่วยและยอดรวม (Price & Amount)",
-    "shipping marks": "14. เครื่องหมายการขนส่ง (Shipping Marks)",
-    "marks": "14. เครื่องหมายการขนส่ง (Shipping Marks)",
-    "transport": "15. รายละเอียดการขนส่ง/ท่าเรือ (Transport Details)",
-    "vessel": "15. รายละเอียดการขนส่ง/ท่าเรือ (Transport Details)",
+# Master definition table: (field_pattern, summary_pattern_override, thai_label)
+# Specific compound patterns (e.g., address) are placed before general ones (e.g., name).
+FIELD_DEFINITIONS = [
+    (r"(shipper|exporter).*addr",       None,                            "2. ที่อยู่ผู้ส่งสินค้า (Shipper Address)"),
+    (r"shipper|exporter",              r"(shipper|exporter)(?!.*addr)", "1. ชื่อผู้ส่งสินค้า (Shipper Name)"),
+    (r"consignee.*addr",               None,                            "4. ที่อยู่ผู้รับตราส่ง (Consignee Address)"),
+    (r"consignee",                     r"consignee(?!.*addr)",          "3. ชื่อผู้รับตราส่ง (Consignee Name)"),
+    (r"notify",                        None,                            "5. ผู้รับแจ้ง (Notify Party)"),
+    (r"document|reference|invoice",   None,                            "6. เลขที่เอกสารอ้างอิง (Doc No.)"),
+    (r"\bdate\b",                      None,                            "7. วันที่เอกสาร (Doc Date)"),
+    (r"desc|goods",                    None,                            "8. รายการสินค้า (Description of Goods)"),
+    (r"quant|pack",                    None,                            "9. จำนวนและลักษณะหีบห่อ (Qty & Packages)"),
+    (r"net\s*weight|\bnw\b",           None,                            "10. น้ำหนักสุทธิ (Net Weight - NW)"),
+    (r"gross\s*weight|\bgw\b",         None,                            "11. น้ำหนักรวม (Gross Weight - GW)"),
+    (r"volume|cbm",                    None,                            "12. ปริมาตรสินค้า (Volume - CBM)"),
+    (r"hs\s*code",                     None,                            "13. พิกัดศุลกากร (HS Code)"),
+    (r"price|amount",                  None,                            "14. ราคาต่อหน่วยและยอดรวม (Price & Amount)"),
+    (r"marks?",                        None,                            "15. เครื่องหมายการขนส่ง (Shipping Marks)"),
+    (r"vessel|voyage|flight",          None,                            "16. ชื่อเรือ / เที่ยวบิน / ลำดับเที่ยว (Vessel / Voyage)"),
+    (r"loading|\bpol\b",               None,                            "17. ท่าเรือต้นทาง / บรรทุก (Port of Loading - POL)"),
+    (r"discharge|\bpod\b|destination", None,                            "18. ท่าเรือปลายทาง (Port of Discharge - POD)"),
+]
+
+DOC_PATTERNS = {
+    "ci": r"\b(ci|commercial\s+invoice)\b",
+    "pl": r"\b(pl|packing\s+list)\b",
+    "bl": r"\b(bl|b/?l|bill\s+of\s+lading)\b",
+    "co": r"\b(co|c/?o|certificate\s+of\s+origin)\b",
+    "master_db": r"\b(master\s+db|database)\b",
 }
 
 
+def _translate_field_to_thai(raw_field: str) -> str:
+    """Translate field headers to Thai using the master definition table."""
+    return next((thai for f_pat, _, thai in FIELD_DEFINITIONS if re.search(f_pat, raw_field, re.I)), raw_field)
+
+
+def reconcile_discrepancies(data: dict) -> dict:
+    """Ensure every cell mentioned in discrepancy_summary is prefixed with ⚠️."""
+    rows = data.get("audit_table", [])
+    summaries = data.get("discrepancy_summary", [])
+    if not isinstance(summaries, list) or not rows:
+        return data
+
+    for summary in summaries:
+        target_docs = [col for col, pat in DOC_PATTERNS.items() if re.search(pat, summary, re.I)]
+        cols = target_docs if target_docs else ["ci", "pl", "bl", "co", "master_db"]
+
+        for row in rows:
+            fname = str(row.get("field", ""))
+            is_match = any(
+                re.search(f_pat, fname, re.I) and re.search(s_pat or f_pat, summary, re.I)
+                for f_pat, s_pat, _ in FIELD_DEFINITIONS
+            )
+            if is_match:
+                for col in cols:
+                    val = str(row.get(col, "")).strip()
+                    if val and val != "-" and not val.startswith("⚠️"):
+                        row[col] = f"⚠️ {val}"
+
+    return data
+
 class LogisticsAuditorApp:
-    """Desktop GUI with live language toggling and error highlighting."""
+    """Desktop GUI with 18-row breakdown, live language toggling, and discrepancy highlighting."""
 
     def __init__(self) -> None:
         self.root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
@@ -248,7 +268,6 @@ class LogisticsAuditorApp:
             font=("Segoe UI", 9, "italic"),
         ).pack(anchor=tk.W, pady=(6, 2))
 
-        # Bottom company signature
         self.footer_label = ttk.Label(
             frame,
             font=("Segoe UI", 8),
@@ -338,10 +357,7 @@ class LogisticsAuditorApp:
         if not output_dir.exists():
             return []
 
-        files = [
-            f for f in output_dir.rglob("*.json")
-            if f.is_file()
-        ]
+        files = [f for f in output_dir.rglob("*.json") if f.is_file()]
         files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
         return files[:5]
 
@@ -467,7 +483,7 @@ class LogisticsAuditorApp:
         is_thai = self.use_thai.get()
         popup = tk.Toplevel(self.root)
         popup.title(self._t("audit_popup_title").format(name=pdf_name))
-        popup.geometry("1280x780")
+        popup.geometry("1300x800")
 
         try:
             data = json.loads(result_str)
@@ -477,6 +493,9 @@ class LogisticsAuditorApp:
                 data = json.loads(clean_str)
             except Exception:
                 data = {}
+
+        # Auto-reconcile summary and grid so all discrepancy cells turn red
+        data = reconcile_discrepancies(data)
 
         top_frame = ttk.Frame(popup)
         top_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
@@ -521,16 +540,7 @@ class LogisticsAuditorApp:
         rows = data.get("audit_table", [])
         for row_idx, item in enumerate(rows, start=1):
             raw_field = str(item.get("field", "-"))
-
-            if is_thai:
-                field_lower = raw_field.lower()
-                field_display = raw_field
-                for key, thai_val in THAI_FIELD_MAP.items():
-                    if key in field_lower:
-                        field_display = thai_val
-                        break
-            else:
-                field_display = raw_field
+            field_display = _translate_field_to_thai(raw_field) if is_thai else raw_field
 
             cells = [
                 field_display,
@@ -553,7 +563,7 @@ class LogisticsAuditorApp:
                     font_style = ("Segoe UI", 9, "bold")
                 elif col_idx == 0:
                     bg_color = "#f8fafc"
-                    fg_color = "#0f172a" if not row_has_error else "#991b1b"
+                    fg_color = "#991b1b" if row_has_error else "#0f172a"
                     font_style = ("Segoe UI", 9, "bold" if row_has_error else "normal")
                 else:
                     bg_color = "#ffffff"
@@ -613,47 +623,6 @@ class LogisticsAuditorApp:
 
         summary_text.insert("1.0", summary_content)
         summary_text.config(state="disabled")
-
-    def _check_updates_background(self) -> None:
-        """Query GitHub Releases asynchronously on startup."""
-        def _worker():
-            has_update, latest_ver, dl_url = check_for_updates()
-            if has_update and dl_url:
-                self._latest_ver = latest_ver
-                self._download_url = dl_url
-                self.root.after(0, self._reveal_update_button)
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    def _reveal_update_button(self) -> None:
-        """Show update button in the navbar when a new release is available."""
-        btn_text = self._t("update_btn").format(ver=self._latest_ver)
-        self.update_btn.config(text=btn_text)
-        self.update_btn.pack(side=tk.LEFT, padx=3)
-
-    def _start_update_flow(self) -> None:
-        """Prompt user and execute update replacement."""
-        title = self._t("update_prompt_title")
-        msg = self._t("update_prompt_msg").format(ver=self._latest_ver)
-        if not messagebox.askyesno(title, msg):
-            return
-
-        self._busy = True
-        self.update_btn.config(state="disabled")
-
-        def _worker():
-            try:
-                def on_progress(pct: int):
-                    status_text = self._t("updating_status").format(pct=pct)
-                    self._set_status(status_text)
-
-                apply_update_and_restart(self._download_url, progress_callback=on_progress)
-            except Exception as exc:
-                self.root.after(0, lambda: messagebox.showerror("Update Error", str(exc)))
-                self._busy = False
-                self.update_btn.config(state="normal")
-
-        threading.Thread(target=_worker, daemon=True).start()
 
     def run(self) -> None:
         self.root.mainloop()
