@@ -344,7 +344,11 @@ class LogisticsAuditorApp:
                 def on_progress(pct: int):
                     self._set_status(self._t("updating_status").format(pct=pct))
 
-                apply_update_and_restart(self._download_url, progress_callback=on_progress)
+                apply_update_and_restart(
+                    self._download_url,
+                    new_version=self._latest_ver,
+                    progress_callback=on_progress,
+                )
             except Exception as exc:
                 self.root.after(0, lambda: messagebox.showerror("Update Error", str(exc)))
                 self._busy = False
