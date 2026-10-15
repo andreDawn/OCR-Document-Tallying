@@ -1,6 +1,7 @@
 """Tkinter desktop UI: drag-and-drop, full Thai UI switching, recent history, box-highlighted auditing, and Dawn Shipping branding."""
 
 from __future__ import annotations
+from updater import CURRENT_VERSION, check_for_updates, apply_update_and_restart
 
 import json
 import re
@@ -76,6 +77,12 @@ UI_TEXT = {
         "summary_title": " Discrepancy Summary & Notes ",
         "no_discrepancy": "All checked data points match.",
         "watermark_label": "⚠️ Watermark Warning:",
+
+        # In UI_TEXT["en"]:
+        "update_btn": "🔄 Update Available ({ver})",
+        "update_prompt_title": "Update Logistics Auditor",
+        "update_prompt_msg": "A new version ({ver}) is ready. Update and restart now?",
+        "updating_status": "Downloading update {pct}%...",
     },
     "th": {
         "app_title": "ระบบตรวจสอบเอกสารโลจิสติกส์ - Dawn Shipping (Thailand)",
@@ -127,6 +134,12 @@ UI_TEXT = {
         "summary_title": " สรุปข้อขัดแย้งและบันทึกเพิ่มเติม (Discrepancy Summary) ",
         "no_discrepancy": "ข้อมูลตรงกันทุกรายการ ไม่พบข้อขัดแย้ง",
         "watermark_label": "⚠️ คำเตือนลายน้ำ:",
+
+        # In UI_TEXT["th"]:
+        "update_btn": "🔄 มีเวอร์ชันใหม่ ({ver})",
+        "update_prompt_title": "อัปเดตระบบตรวจสอบเอกสาร",
+        "update_prompt_msg": "พบเวอร์ชันใหม่ ({ver}) ต้องการดาวน์โหลดและเปิดโปรแกรมใหม่ทันทีหรือไม่?",
+        "updating_status": "กำลังดาวน์โหลดอัปเดต {pct}%...",
     },
 }
 
@@ -600,6 +613,47 @@ class LogisticsAuditorApp:
 
         summary_text.insert("1.0", summary_content)
         summary_text.config(state="disabled")
+
+    def _check_updates_background(self) -> None:
+        """Query GitHub Releases asynchronously on startup."""
+        def _worker():
+            has_update, latest_ver, dl_url = check_for_updates()
+            if has_update and dl_url:
+                self._latest_ver = latest_ver
+                self._download_url = dl_url
+                self.root.after(0, self._reveal_update_button)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _reveal_update_button(self) -> None:
+        """Show update button in the navbar when a new release is available."""
+        btn_text = self._t("update_btn").format(ver=self._latest_ver)
+        self.update_btn.config(text=btn_text)
+        self.update_btn.pack(side=tk.LEFT, padx=3)
+
+    def _start_update_flow(self) -> None:
+        """Prompt user and execute update replacement."""
+        title = self._t("update_prompt_title")
+        msg = self._t("update_prompt_msg").format(ver=self._latest_ver)
+        if not messagebox.askyesno(title, msg):
+            return
+
+        self._busy = True
+        self.update_btn.config(state="disabled")
+
+        def _worker():
+            try:
+                def on_progress(pct: int):
+                    status_text = self._t("updating_status").format(pct=pct)
+                    self._set_status(status_text)
+
+                apply_update_and_restart(self._download_url, progress_callback=on_progress)
+            except Exception as exc:
+                self.root.after(0, lambda: messagebox.showerror("Update Error", str(exc)))
+                self._busy = False
+                self.update_btn.config(state="normal")
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def run(self) -> None:
         self.root.mainloop()
