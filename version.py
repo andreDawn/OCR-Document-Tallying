@@ -4,19 +4,21 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from paths import get_bundle_dir, get_app_dir
+from paths import get_app_dir, get_bundle_dir
 
-FALLBACK_VERSION = "1.0.0-dev"
+FALLBACK_VERSION = "1.0.1"
 
 
 def get_current_version() -> str:
-    """Read version dynamically injected during build, or fall back to dev version."""
+    """Read version injected by CI/CD at build time, or fall back cleanly."""
     for base in [get_bundle_dir(), get_app_dir(), Path.cwd()]:
         v_file = base / "version.json"
         if v_file.is_file():
             try:
                 data = json.loads(v_file.read_text(encoding="utf-8"))
-                return data.get("version", FALLBACK_VERSION).lstrip("v")
+                ver = str(data.get("version", "")).strip().lstrip("v")
+                if ver:
+                    return ver
             except Exception:
                 pass
     return FALLBACK_VERSION

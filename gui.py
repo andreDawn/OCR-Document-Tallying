@@ -1,4 +1,4 @@
-"""Tkinter desktop UI: 18-field auditing, live reconciliation highlighting, and Thai toggling."""
+"""Tkinter desktop UI: 18-field auditing, dynamic versioning, and auto-update flow."""
 
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ from gemini_client import extract_from_jpegs, save_markdown
 from master_db import load_master_database_excerpt
 from paths import job_output_dir
 from pdf_processor import flatten_pdf_to_jpegs
+from updater import apply_update_and_restart, check_for_updates
+from version import get_current_version
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -25,6 +27,36 @@ except ImportError:
     TkinterDnD = None
     HAS_DND = False
 
+# Master definition table: (field_pattern, summary_pattern_override, thai_label)
+FIELD_DEFINITIONS = [
+    (r"(shipper|exporter).*addr",       None,                            "2. ที่อยู่ผู้ส่งสินค้า (Shipper Address)"),
+    (r"shipper|exporter",              r"(shipper|exporter)(?!.*addr)", "1. ชื่อผู้ส่งสินค้า (Shipper Name)"),
+    (r"consignee.*addr",               None,                            "4. ที่อยู่ผู้รับตราส่ง (Consignee Address)"),
+    (r"consignee",                     r"consignee(?!.*addr)",          "3. ชื่อผู้รับตราส่ง (Consignee Name)"),
+    (r"notify",                        None,                            "5. ผู้รับแจ้ง (Notify Party)"),
+    (r"document|reference|invoice",   None,                            "6. เลขที่เอกสารอ้างอิง (Doc No.)"),
+    (r"\bdate\b",                      None,                            "7. วันที่เอกสาร (Doc Date)"),
+    (r"desc|goods",                    None,                            "8. รายการสินค้า (Description of Goods)"),
+    (r"quant|pack",                    None,                            "9. จำนวนและลักษณะหีบห่อ (Qty & Packages)"),
+    (r"net\s*weight|\bnw\b",           None,                            "10. น้ำหนักสุทธิ (Net Weight - NW)"),
+    (r"gross\s*weight|\bgw\b",         None,                            "11. น้ำหนักรวม (Gross Weight - GW)"),
+    (r"volume|cbm",                    None,                            "12. ปริมาตรสินค้า (Volume - CBM)"),
+    (r"hs\s*code",                     None,                            "13. พิกัดศุลกากร (HS Code)"),
+    (r"price|amount",                  None,                            "14. ราคาต่อหน่วยและยอดรวม (Price & Amount)"),
+    (r"marks?",                        None,                            "15. เครื่องหมายการขนส่ง (Shipping Marks)"),
+    (r"vessel|voyage|flight",          None,                            "16. ชื่อเรือ / เที่ยวบิน / ลำดับเที่ยว (Vessel / Voyage)"),
+    (r"loading|\bpol\b",               None,                            "17. ท่าเรือต้นทาง / บรรทุก (Port of Loading - POL)"),
+    (r"discharge|\bpod\b|destination", None,                            "18. ท่าเรือปลายทาง (Port of Discharge - POD)"),
+]
+
+DOC_PATTERNS = {
+    "ci": r"\b(ci|commercial\s+invoice)\b",
+    "pl": r"\b(pl|packing\s+list)\b",
+    "bl": r"\b(bl|b/?l|bill\s+of\s+lading)\b",
+    "co": r"\b(co|c/?o|certificate\s+of\s+origin)\b",
+    "master_db": r"\b(master\s+db|database)\b",
+}
+
 UI_TEXT = {
     "en": {
         "app_title": "Logistics PDF Auditor - Dawn Shipping (Thailand)",
@@ -33,13 +65,10 @@ UI_TEXT = {
         "new_btn": "➕ New Audit",
         "about_btn": "ℹ️ About",
         "about_title": "About Logistics PDF Auditor",
-        "about_body": (
-            "Logistics PDF Auditor v1.0.0\n\n"
-            "Company: Dawn Shipping (Thailand) Co., Ltd.\n"
-            "Contact & Support: Andre Lim (andrelim@dawnsg.com)\n"
-            "Engine: Gemini Multimodal Vision Pipeline\n\n"
-            "Internal Company Property • Unauthorized distribution strictly prohibited."
-        ),
+        "update_btn": "🔄 Update Available ({ver})",
+        "update_prompt_title": "Update Logistics Auditor",
+        "update_prompt_msg": "A new version ({ver}) is ready. Download and restart now?",
+        "updating_status": "Downloading update {pct}%...",
         "hint": "Drop PDF files (CI, PL, BL, CO) below or click 'New Audit'. Pages are flattened to 300 DPI JPEGs and cross-checked against the Consignee Master DB.",
         "drop_zone": "Drag and drop PDF files here\n\nor click 'New Audit' above",
         "chk_thai": "Use Thai Language UI (ใช้งานภาษาไทย)",
@@ -84,13 +113,10 @@ UI_TEXT = {
         "new_btn": "➕ ตรวจสอบเอกสารใหม่",
         "about_btn": "ℹ️ เกี่ยวกับระบบ",
         "about_title": "เกี่ยวกับระบบตรวจสอบเอกสาร",
-        "about_body": (
-            "ระบบตรวจสอบเอกสารโลจิสติกส์ v1.0.0\n\n"
-            "พัฒนาสำหรับ: บริษัท ดอว์น ชิปปิ้ง (ประเทศไทย) จำกัด\n"
-            "ผู้ดูแลและประสานงาน: Andre Lim (andrelim@dawnsg.com)\n"
-            "ระบบประมวลผล: Gemini Multimodal Vision Pipeline\n\n"
-            "สงวนลิขสิทธิ์ • สำหรับการใช้งานภายในองค์กรเท่านั้น"
-        ),
+        "update_btn": "🔄 มีเวอร์ชันใหม่ ({ver})",
+        "update_prompt_title": "อัปเดตระบบตรวจสอบเอกสาร",
+        "update_prompt_msg": "พบเวอร์ชันใหม่ ({ver}) ต้องการดาวน์โหลดและเปิดโปรแกรมใหม่ทันทีหรือไม่?",
+        "updating_status": "กำลังดาวน์โหลดอัปเดต {pct}%...",
         "hint": "ลากไฟล์ PDF (CI, PL, BL, CO) มาวางด้านล่าง หรือคลิก 'ตรวจสอบเอกสารใหม่' ระบบจะแปลงไฟล์เป็นรูปภาพ 300 DPI และเปรียบเทียบข้อมูลกับฐานข้อมูลหลัก",
         "drop_zone": "ลากและวางไฟล์ PDF ที่นี่\n\nหรือคลิก 'ตรวจสอบเอกสารใหม่' ด้านบน",
         "chk_thai": "ใช้งานภาษาไทยทั้งระบบ (Thai Language UI)",
@@ -130,45 +156,31 @@ UI_TEXT = {
     },
 }
 
-# Master definition table: (field_pattern, summary_pattern_override, thai_label)
-# Specific compound patterns (e.g., address) are placed before general ones (e.g., name).
-FIELD_DEFINITIONS = [
-    (r"(shipper|exporter).*addr",       None,                            "2. ที่อยู่ผู้ส่งสินค้า (Shipper Address)"),
-    (r"shipper|exporter",              r"(shipper|exporter)(?!.*addr)", "1. ชื่อผู้ส่งสินค้า (Shipper Name)"),
-    (r"consignee.*addr",               None,                            "4. ที่อยู่ผู้รับตราส่ง (Consignee Address)"),
-    (r"consignee",                     r"consignee(?!.*addr)",          "3. ชื่อผู้รับตราส่ง (Consignee Name)"),
-    (r"notify",                        None,                            "5. ผู้รับแจ้ง (Notify Party)"),
-    (r"document|reference|invoice",   None,                            "6. เลขที่เอกสารอ้างอิง (Doc No.)"),
-    (r"\bdate\b",                      None,                            "7. วันที่เอกสาร (Doc Date)"),
-    (r"desc|goods",                    None,                            "8. รายการสินค้า (Description of Goods)"),
-    (r"quant|pack",                    None,                            "9. จำนวนและลักษณะหีบห่อ (Qty & Packages)"),
-    (r"net\s*weight|\bnw\b",           None,                            "10. น้ำหนักสุทธิ (Net Weight - NW)"),
-    (r"gross\s*weight|\bgw\b",         None,                            "11. น้ำหนักรวม (Gross Weight - GW)"),
-    (r"volume|cbm",                    None,                            "12. ปริมาตรสินค้า (Volume - CBM)"),
-    (r"hs\s*code",                     None,                            "13. พิกัดศุลกากร (HS Code)"),
-    (r"price|amount",                  None,                            "14. ราคาต่อหน่วยและยอดรวม (Price & Amount)"),
-    (r"marks?",                        None,                            "15. เครื่องหมายการขนส่ง (Shipping Marks)"),
-    (r"vessel|voyage|flight",          None,                            "16. ชื่อเรือ / เที่ยวบิน / ลำดับเที่ยว (Vessel / Voyage)"),
-    (r"loading|\bpol\b",               None,                            "17. ท่าเรือต้นทาง / บรรทุก (Port of Loading - POL)"),
-    (r"discharge|\bpod\b|destination", None,                            "18. ท่าเรือปลายทาง (Port of Discharge - POD)"),
-]
 
-DOC_PATTERNS = {
-    "ci": r"\b(ci|commercial\s+invoice)\b",
-    "pl": r"\b(pl|packing\s+list)\b",
-    "bl": r"\b(bl|b/?l|bill\s+of\s+lading)\b",
-    "co": r"\b(co|c/?o|certificate\s+of\s+origin)\b",
-    "master_db": r"\b(master\s+db|database)\b",
-}
+def _get_about_text(lang: str) -> str:
+    ver = get_current_version()
+    if lang == "th":
+        return (
+            f"ระบบตรวจสอบเอกสารโลจิสติกส์ v{ver}\n\n"
+            "พัฒนาสำหรับ: บริษัท ดอว์น ชิปปิ้ง (ประเทศไทย) จำกัด\n"
+            "ฝ่ายประสานงานและดูแลระบบ: Andre Lim (andrelim@dawnsg.com)\n"
+            "ระบบประมวลผล: Gemini Multimodal Vision Pipeline\n\n"
+            "สงวนลิขสิทธิ์ • สำหรับการใช้งานภายในองค์กรเท่านั้น"
+        )
+    return (
+        f"Logistics PDF Auditor v{ver}\n\n"
+        "Company: Dawn Shipping (Thailand) Co., Ltd.\n"
+        "Contact & Support: Andre Lim (andrelim@dawnsg.com)\n"
+        "Engine: Gemini Multimodal Vision Pipeline\n\n"
+        "Internal Company Property • Unauthorized distribution strictly prohibited."
+    )
 
 
 def _translate_field_to_thai(raw_field: str) -> str:
-    """Translate field headers to Thai using the master definition table."""
     return next((thai for f_pat, _, thai in FIELD_DEFINITIONS if re.search(f_pat, raw_field, re.I)), raw_field)
 
 
 def reconcile_discrepancies(data: dict) -> dict:
-    """Ensure every cell mentioned in discrepancy_summary is prefixed with ⚠️."""
     rows = data.get("audit_table", [])
     summaries = data.get("discrepancy_summary", [])
     if not isinstance(summaries, list) or not rows:
@@ -193,22 +205,26 @@ def reconcile_discrepancies(data: dict) -> dict:
     return data
 
 class LogisticsAuditorApp:
-    """Desktop GUI with 18-row breakdown, live language toggling, and discrepancy highlighting."""
+    """Desktop GUI with 18-row auditing, auto-updates, and bilingual support."""
 
     def __init__(self) -> None:
         self.root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
-        self.root.geometry("820x560")
+        self.root.geometry("860x580")
         self.root.minsize(740, 480)
 
         self.status = StringVar()
         self.use_thai = BooleanVar(value=False)
         self._busy = False
+        self._latest_ver = ""
+        self._download_url = ""
 
         self._build_layout()
         self._update_ui_language()
 
         if HAS_DND:
             self._enable_drag_and_drop()
+
+        self._check_updates_background()
 
     def _t(self, key: str) -> str:
         lang = "th" if self.use_thai.get() else "en"
@@ -227,6 +243,8 @@ class LogisticsAuditorApp:
         nav_frame = ttk.Frame(header_frame)
         nav_frame.pack(side=tk.RIGHT)
 
+        self.update_btn = ttk.Button(nav_frame, command=self._start_update_flow)
+
         self.recent_btn = ttk.Button(nav_frame, command=self._show_recent_audits)
         self.recent_btn.pack(side=tk.LEFT, padx=3)
 
@@ -236,7 +254,7 @@ class LogisticsAuditorApp:
         self.about_btn = ttk.Button(nav_frame, command=self._show_about_dialog)
         self.about_btn.pack(side=tk.LEFT, padx=3)
 
-        self.hint_label = ttk.Label(frame, wraplength=760)
+        self.hint_label = ttk.Label(frame, wraplength=780)
         self.hint_label.pack(anchor=tk.W, pady=(0, 10))
 
         self.drop_zone = tk.Label(
@@ -264,7 +282,7 @@ class LogisticsAuditorApp:
         ttk.Label(
             frame,
             textvariable=self.status,
-            wraplength=760,
+            wraplength=780,
             font=("Segoe UI", 9, "italic"),
         ).pack(anchor=tk.W, pady=(6, 2))
 
@@ -277,7 +295,8 @@ class LogisticsAuditorApp:
         self.footer_label.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
 
     def _show_about_dialog(self) -> None:
-        messagebox.showinfo(self._t("about_title"), self._t("about_body"))
+        lang = "th" if self.use_thai.get() else "en"
+        messagebox.showinfo(self._t("about_title"), _get_about_text(lang))
 
     def _update_ui_language(self) -> None:
         self.root.title(self._t("app_title"))
@@ -290,8 +309,48 @@ class LogisticsAuditorApp:
         self.chk_thai.config(text=self._t("chk_thai"))
         self.footer_label.config(text=self._t("company_footer"))
 
+        if self._latest_ver:
+            self.update_btn.config(text=self._t("update_btn").format(ver=self._latest_ver))
+
         if not self._busy:
             self.status.set(self._t("ready"))
+
+    def _check_updates_background(self) -> None:
+        def _worker():
+            has_update, latest_ver, dl_url = check_for_updates()
+            if has_update and dl_url:
+                self._latest_ver = latest_ver
+                self._download_url = dl_url
+                self.root.after(0, self._reveal_update_button)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _reveal_update_button(self) -> None:
+        btn_text = self._t("update_btn").format(ver=self._latest_ver)
+        self.update_btn.config(text=btn_text)
+        self.update_btn.pack(side=tk.LEFT, padx=3, before=self.recent_btn)
+
+    def _start_update_flow(self) -> None:
+        title = self._t("update_prompt_title")
+        msg = self._t("update_prompt_msg").format(ver=self._latest_ver)
+        if not messagebox.askyesno(title, msg):
+            return
+
+        self._busy = True
+        self.update_btn.config(state="disabled")
+
+        def _worker():
+            try:
+                def on_progress(pct: int):
+                    self._set_status(self._t("updating_status").format(pct=pct))
+
+                apply_update_and_restart(self._download_url, progress_callback=on_progress)
+            except Exception as exc:
+                self.root.after(0, lambda: messagebox.showerror("Update Error", str(exc)))
+                self._busy = False
+                self.update_btn.config(state="normal")
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _enable_drag_and_drop(self) -> None:
         self.drop_zone.drop_target_register(DND_FILES)
@@ -479,7 +538,6 @@ class LogisticsAuditorApp:
             self.root.after(0, fail)
 
     def display_audit_results(self, pdf_name: str, result_str: str) -> None:
-        """Render audit results in a grid with highlighted error boxes."""
         is_thai = self.use_thai.get()
         popup = tk.Toplevel(self.root)
         popup.title(self._t("audit_popup_title").format(name=pdf_name))
@@ -494,7 +552,6 @@ class LogisticsAuditorApp:
             except Exception:
                 data = {}
 
-        # Auto-reconcile summary and grid so all discrepancy cells turn red
         data = reconcile_discrepancies(data)
 
         top_frame = ttk.Frame(popup)
