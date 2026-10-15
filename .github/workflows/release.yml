@@ -39,7 +39,7 @@ jobs:
       - name: Compile Standalone Executable
         run: |
           pyinstaller --noconsole --onefile `
-            --name "LogisticsAuditor" `
+            --name "Dawn Shipping PDF Auditor" `
             --collect-data tkinterdnd2 `
             --add-data ".env;." `
             --add-data "version.json;." `
