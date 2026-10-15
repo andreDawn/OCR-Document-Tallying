@@ -37,13 +37,12 @@ jobs:
           echo "GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}" > .env
 
       - name: Compile Standalone Executable
+        shell: pwsh
         run: |
-          pyinstaller --noconsole --onefile `
-            --name "Dawn Shipping PDF Auditor" `
-            --collect-data tkinterdnd2 `
-            --add-data ".env;." `
-            --add-data "version.json;." `
-            main.py
+          pyinstaller --noconsole --onefile --name "LogisticsAuditor" --collect-data tkinterdnd2 --add-data ".env;." --add-data "version.json;." main.py
+          if (-not (Test-Path "dist\LogisticsAuditor.exe")) {
+              throw "PyInstaller failed: dist\LogisticsAuditor.exe does not exist!"
+          }
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
@@ -54,5 +53,6 @@ jobs:
           prerelease: false
           generate_release_notes: true
           files: dist/LogisticsAuditor.exe
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
