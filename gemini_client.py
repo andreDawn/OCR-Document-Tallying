@@ -1,43 +1,20 @@
-"""Gemini API client handling PDF page extraction and structured JSON auditing."""
+"""Gemini Vision client for multimodal logistics document extraction and reporting."""
 
 from __future__ import annotations
 
 import time
 from pathlib import Path
 from typing import Callable
-
 from google import genai
 from google.genai import types
 
 from config import (
+    MASTER_DB_SOURCE_NAME,
     MODEL_CASCADE,
     SYSTEM_INSTRUCTION,
     USER_PROMPT_TEMPLATE,
-    MASTER_DB_SOURCE_NAME,
     get_gemini_api_key,
 )
-
-
-def _build_user_prompt(
-    pdf_path: Path,
-    page_count: int,
-    master_db_excerpt: str,
-    use_thai: bool,
-) -> str:
-    language_command = (
-        "LANGUAGE INSTRUCTION: Output ALL field/row names, watermark warnings, and "
-        "discrepancy summary descriptions in THAI. HOWEVER, ALL EXTRACTED VALUE STRINGS "
-        "INSIDE TABLE DATA CELLS (ci, pl, bl, co, master_db) MUST REMAIN STRICTLY IN ORIGINAL ENGLISH VERBATIM."
-        if use_thai
-        else "LANGUAGE INSTRUCTION: Output all JSON text in ENGLISH. All extracted value strings inside data cells must remain in English verbatim."
-    )
-    return USER_PROMPT_TEMPLATE.format(
-        pdf_name=pdf_path.name,
-        page_count=page_count,
-        master_db_name=MASTER_DB_SOURCE_NAME,
-        master_db_excerpt=master_db_excerpt,
-        language_command=language_command,
-    )
 
 
 def extract_from_jpegs(
@@ -47,7 +24,7 @@ def extract_from_jpegs(
     use_thai: bool = False,
     status_callback: Callable[[str], None] | None = None,
 ) -> str:
-    """Upload JPEGs to Gemini Vision with structured JSON output, timeouts, and transient retry handling."""
+    """Upload JPEGs to Gemini Vision with pure English table extraction and bilingual summaries."""
     if not jpeg_paths:
         raise ValueError("No JPEG images were provided for extraction.")
 
@@ -59,7 +36,7 @@ def extract_from_jpegs(
 
     uploaded_files = []
     try:
-        # 1. Upload page JPEGs
+        # 1. Upload page JPEGs (status messages respect UI language)
         for i, img_path in enumerate(jpeg_paths, start=1):
             if status_callback:
                 msg = (
@@ -71,16 +48,17 @@ def extract_from_jpegs(
             f = client.files.upload(file=img_path)
             uploaded_files.append(f)
 
-        prompt = _build_user_prompt(
-            pdf_path=pdf_path,
+        # 2. Prompt Gemini in 100% English (enforces English table + bilingual summaries)
+        prompt = USER_PROMPT_TEMPLATE.format(
+            pdf_name=pdf_path.name,
             page_count=len(jpeg_paths),
+            master_db_name=MASTER_DB_SOURCE_NAME,
             master_db_excerpt=master_db_excerpt,
-            use_thai=use_thai,
         )
 
         last_error: Exception | None = None
 
-        # 2. Try models in cascade with transient 503/429 retries
+        # 3. Model cascade with transient 503/429 retries
         for model_name in MODEL_CASCADE:
             for attempt in range(2):
                 try:
@@ -148,9 +126,9 @@ def extract_from_jpegs(
                 pass
 
 
-def save_markdown(pdf_path: Path, content: str, out_dir: Path) -> Path:
-    """Save raw JSON audit report to destination path."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / f"{pdf_path.stem}.json"
+def save_markdown(report_path: Path, content: str, output_dir: Path) -> Path:
+    """Save the raw audit JSON result to the designated output folder."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_file = output_dir / f"{report_path.stem}.json"
     out_file.write_text(content, encoding="utf-8")
     return out_file

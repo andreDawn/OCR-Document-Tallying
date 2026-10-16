@@ -1,9 +1,10 @@
-"""Tkinter desktop UI: 18-field auditing, dynamic versioning, and auto-update flow."""
+"""Tkinter desktop UI: 18-field deterministic auditing, live bilingual toggling, and auto-updater."""
 
 from __future__ import annotations
 
 import json
 import re
+import sys
 import threading
 import traceback
 from datetime import datetime
@@ -27,34 +28,72 @@ except ImportError:
     TkinterDnD = None
     HAS_DND = False
 
-# Master definition table: (field_pattern, summary_pattern_override, thai_label)
 FIELD_DEFINITIONS = [
-    (r"(shipper|exporter).*addr",       None,                            "2. ที่อยู่ผู้ส่งสินค้า (Shipper Address)"),
-    (r"shipper|exporter",              r"(shipper|exporter)(?!.*addr)", "1. ชื่อผู้ส่งสินค้า (Shipper Name)"),
-    (r"consignee.*addr",               None,                            "4. ที่อยู่ผู้รับตราส่ง (Consignee Address)"),
-    (r"consignee",                     r"consignee(?!.*addr)",          "3. ชื่อผู้รับตราส่ง (Consignee Name)"),
-    (r"notify",                        None,                            "5. ผู้รับแจ้ง (Notify Party)"),
-    (r"document|reference|invoice",   None,                            "6. เลขที่เอกสารอ้างอิง (Doc No.)"),
-    (r"\bdate\b",                      None,                            "7. วันที่เอกสาร (Doc Date)"),
-    (r"desc|goods",                    None,                            "8. รายการสินค้า (Description of Goods)"),
-    (r"quant|pack",                    None,                            "9. จำนวนและลักษณะหีบห่อ (Qty & Packages)"),
-    (r"net\s*weight|\bnw\b",           None,                            "10. น้ำหนักสุทธิ (Net Weight - NW)"),
-    (r"gross\s*weight|\bgw\b",         None,                            "11. น้ำหนักรวม (Gross Weight - GW)"),
-    (r"volume|cbm",                    None,                            "12. ปริมาตรสินค้า (Volume - CBM)"),
-    (r"hs\s*code",                     None,                            "13. พิกัดศุลกากร (HS Code)"),
-    (r"price|amount",                  None,                            "14. ราคาต่อหน่วยและยอดรวม (Price & Amount)"),
-    (r"marks?",                        None,                            "15. เครื่องหมายการขนส่ง (Shipping Marks)"),
-    (r"vessel|voyage|flight",          None,                            "16. ชื่อเรือ / เที่ยวบิน / ลำดับเที่ยว (Vessel / Voyage)"),
-    (r"loading|\bpol\b",               None,                            "17. ท่าเรือต้นทาง / บรรทุก (Port of Loading - POL)"),
-    (r"discharge|\bpod\b|destination", None,                            "18. ท่าเรือปลายทาง (Port of Discharge - POD)"),
+    ("shipper_address",   r"(shipper|exporter).*addr|ที่อยู่.*ผู้ส่ง",
+     "2. Shipper / Exporter Address", "2. ที่อยู่ผู้ส่งสินค้า (Shipper Address)"),
+    ("shipper_name",      r"shipper|exporter|ผู้ส่ง",
+     "1. Shipper / Exporter Name", "1. ชื่อผู้ส่งสินค้า (Shipper Name)"),
+    ("consignee_address", r"consignee.*addr|ที่อยู่.*ผู้รับ",
+     "4. Consignee Address", "4. ที่อยู่ผู้รับตราส่ง (Consignee Address)"),
+    ("consignee_name",    r"consignee|ผู้รับ(?!แจ้ง)",
+     "3. Consignee Name", "3. ชื่อผู้รับตราส่ง (Consignee Name)"),
+    ("notify",            r"notify|ผู้รับแจ้ง",
+     "5. Notify Party Name & Address", "5. ผู้รับแจ้ง (Notify Party)"),
+    ("date",              r"\bdate\b|วันที่",
+     "7. Document Date", "7. วันที่เอกสาร (Doc Date)"),
+    ("document",          r"doc|reference|invoice|เลขที่|อ้างอิง",
+     "6. Document / Reference No.", "6. เลขที่เอกสารอ้างอิง (Doc No.)"),
+    ("description",       r"desc|goods|รายละเอียด|รายการสินค้า|สินค้า",
+     "8. Description of Goods", "8. รายการสินค้า (Description of Goods)"),
+    ("quantity",          r"quant|pack|จำนวน|หีบห่อ",
+     "9. Quantity & Packages", "9. จำนวนและลักษณะหีบห่อ (Qty & Packages)"),
+    ("net_weight",        r"net\s*weight|\bnw\b|น้ำหนักสุทธิ",
+     "10. Net Weight (NW)", "10. น้ำหนักสุทธิ (Net Weight - NW)"),
+    ("gross_weight",      r"gross\s*weight|\bgw\b|น้ำหนักรวม",
+     "11. Gross Weight (GW)", "11. น้ำหนักรวม (Gross Weight - GW)"),
+    ("volume",            r"volume|cbm|ปริมาตร",
+     "12. Volume (CBM)", "12. ปริมาตรสินค้า (Volume - CBM)"),
+    ("hs_code",           r"hs\s*code|พิกัด|รหัส\s*hs",
+     "13. HS Code", "13. พิกัดศุลกากร (HS Code)"),
+    ("price",             r"price|amount|ราคา|ยอดรวม",
+     "14. Unit Price & Total Amount", "14. ราคาต่อหน่วยและยอดรวม (Price & Amount)"),
+    ("marks",             r"marks?|เครื่องหมาย",
+     "15. Shipping Marks", "15. เครื่องหมายการขนส่ง (Shipping Marks)"),
+    ("vessel",            r"vessel|voyage|flight|เรือ|เที่ยวบิน",
+     "16. Vessel / Flight / Voyage No.", "16. ชื่อเรือ / เที่ยวบิน / ลำดับเที่ยว (Vessel / Voyage)"),
+    ("pol",               r"loading|\bpol\b|ต้นทาง|บรรทุก",
+     "17. Port of Loading (POL)", "17. ท่าเรือต้นทาง / บรรทุก (Port of Loading - POL)"),
+    ("pod",               r"discharge|\bpod\b|destination|ปลายทาง",
+     "18. Port of Discharge (POD)", "18. ท่าเรือปลายทาง (Port of Discharge - POD)"),
 ]
 
+SUMMARY_PATTERNS = {
+    "shipper_address":   r"(shipper|exporter).*addr|ที่อยู่.*ผู้ส่ง",
+    "shipper_name":      r"((shipper|exporter)(?!.*addr)|(ผู้ส่ง(?!.*ที่อยู่)))",
+    "consignee_address": r"consignee.*addr|ที่อยู่.*ผู้รับ",
+    "consignee_name":    r"consignee(?!.*addr)|ผู้รับ(?!.*(ที่อยู่|แจ้ง))",
+    "notify":            r"notify|ผู้รับแจ้ง",
+    "document":          r"$^",  # Independent serials, never flag
+    "date":              r"$^",  # Independent dates, never flag
+    "description":       r"desc|goods|สินค้า",
+    "quantity":          r"quant|pack|จำนวน|หีบห่อ|ชิ้น|กล่อง|พาเลท",
+    "net_weight":        r"net\s*weight|\bnw\b|น้ำหนักสุทธิ",
+    "gross_weight":      r"gross\s*weight|\bgw\b|น้ำหนักรวม",
+    "volume":            r"volume|cbm|ปริมาตร",
+    "hs_code":           r"hs\s*code|พิกัด|รหัส\s*hs",
+    "price":             r"price|amount|ราคา|ยอดรวม",
+    "marks":             r"marks?|เครื่องหมาย",
+    "vessel":            r"vessel|voyage|flight|เรือ|เที่ยวบิน",
+    "pol":               r"loading|\bpol\b|ต้นทาง|บรรทุก",
+    "pod":               r"discharge|\bpod\b|destination|ปลายทาง",
+}
+
 DOC_PATTERNS = {
-    "ci": r"\b(ci|commercial\s+invoice)\b",
-    "pl": r"\b(pl|packing\s+list)\b",
-    "bl": r"\b(bl|b/?l|bill\s+of\s+lading)\b",
-    "co": r"\b(co|c/?o|certificate\s+of\s+origin)\b",
-    "master_db": r"\b(master\s+db|database)\b",
+    "ci": r"\b(ci|commercial\s+invoice)\b|ใบกำกับสินค้า",
+    "pl": r"\b(pl|packing\s+list)\b|รายการบรรจุ",
+    "bl": r"\b(bl|b/?l|bill\s+of\s+lading)\b|ใบตราส่ง",
+    "co": r"\b(co|c/?o|certificate\s+of\s+origin)\b|หนังสือรับรองถิ่นกำเนิด|ใบรับรองถิ่นกำเนิด",
+    "master_db": r"\b(master\s+db|database)\b|ฐานข้อมูล",
 }
 
 UI_TEXT = {
@@ -157,6 +196,28 @@ UI_TEXT = {
 }
 
 
+def parse_audit_json(raw: str) -> dict:
+    """Robustly parse JSON even if surrounded by markdown code fences or preambles."""
+    raw = raw.strip()
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+
+    m = re.search(r"\{[\s\S]*\}", raw)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+
+    clean = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()
+    try:
+        return json.loads(clean)
+    except Exception:
+        return {}
+
+
 def _get_about_text(lang: str) -> str:
     ver = get_current_version()
     if lang == "th":
@@ -176,37 +237,159 @@ def _get_about_text(lang: str) -> str:
     )
 
 
-def _translate_field_to_thai(raw_field: str) -> str:
-    return next((thai for f_pat, _, thai in FIELD_DEFINITIONS if re.search(f_pat, raw_field, re.I)), raw_field)
+def get_field_info(raw_field: str) -> tuple[str, str, str]:
+    rf = raw_field.lower()
+    for key, pat, en_lbl, th_lbl in FIELD_DEFINITIONS:
+        if "addr" in key and not ("addr" in rf or "ที่อยู่" in rf):
+            continue
+        if key in ("shipper_name", "consignee_name") and ("addr" in rf or "ที่อยู่" in rf):
+            continue
+        if re.search(pat, rf, re.I):
+            return key, en_lbl, th_lbl
+    return "unknown", raw_field, raw_field
+
+
+def normalize_company_name(name: str) -> str:
+    n = name.upper()
+    n = re.sub(r"[^\w\s]", " ", n)
+    n = re.sub(r"\b(CO|LTD|COMPANY|LIMITED|CORPORATION|CORP|INC)\b", "", n)
+    return " ".join(n.split())
+
+
+def normalize_weight_to_kg(text: str) -> float | None:
+    """Extract weight value and convert MT / Metric Tons to KG for equal comparison."""
+    clean = text.upper().replace(",", "").strip()
+    m = re.search(r"[-+]?\d*\.?\d+", clean)
+    if not m:
+        return None
+    try:
+        val = float(m.group())
+    except ValueError:
+        return None
+
+    if re.search(r"\b(MT|M/T|METRIC\s*TONS?|TONS?)\b", clean):
+        val *= 1000.0
+
+    return round(val, 2)
+
+
+def extract_numeric(text: str) -> float | None:
+    m = re.search(r"[-+]?\d*\.?\d+", text)
+    if m:
+        try:
+            return float(m.group())
+        except ValueError:
+            return None
+    return None
+
+
+def run_deterministic_audit(rows: list[dict]) -> tuple[list[str], list[str]]:
+    """Directly inspect cells for typos, weight (MT/KG), and volume mismatches."""
+    added_en: list[str] = []
+    added_th: list[str] = []
+
+    for row in rows:
+        field = str(row.get("field", ""))
+        f_lower = field.lower()
+
+        if "reference" in f_lower or "document /" in f_lower or "invoice no" in f_lower or "date" in f_lower:
+            continue
+
+        doc_vals = {col: str(row.get(col, "-")).strip() for col in ["ci", "pl", "bl", "co"]}
+        active_vals = {col: v for col, v in doc_vals.items() if v and v != "-" and "blank" not in v.lower()}
+
+        if len(active_vals) <= 1:
+            continue
+
+        # Shipper / Exporter Name Check
+        if ("shipper" in f_lower or "exporter" in f_lower) and "name" in f_lower:
+            norms = {c: normalize_company_name(v) for c, v in active_vals.items()}
+            if len(set(norms.values())) > 1:
+                for c in active_vals:
+                    val = str(row.get(c, "")).strip()
+                    if val and not val.startswith("⚠️"):
+                        row[c] = f"⚠️ {val}"
+                diff_desc = " / ".join(f"{c.upper()}: {active_vals[c]}" for c in active_vals)
+                added_en.append(f"Typographical error/mismatch in Shipper Name across documents ({diff_desc}).")
+                added_th.append(f"พบการสะกดชื่อผู้ส่งสินค้าไม่ตรงกันระหว่างเอกสาร ({diff_desc})")
+
+        # Gross Weight Check across PL, BL, CO with MT -> KG conversion
+        elif "gross weight" in f_lower or "gw" in f_lower:
+            gw_docs = {c: v for c, v in active_vals.items() if c in ["pl", "bl", "co"]}
+            num_map = {c: normalize_weight_to_kg(v) for c, v in gw_docs.items() if normalize_weight_to_kg(v) is not None}
+            vals = list(num_map.values())
+            if len(vals) > 1 and (max(vals) - min(vals)) > 0.5:
+                for c in gw_docs:
+                    val = str(row.get(c, "")).strip()
+                    if val and not val.startswith("⚠️"):
+                        row[c] = f"⚠️ {val}"
+                diff_desc = " vs ".join(f"{c.upper()} ({gw_docs[c]})" for c in gw_docs)
+                added_en.append(f"Gross Weight mismatch between documents: {diff_desc}.")
+                added_th.append(f"น้ำหนักรวม (Gross Weight) ไม่ตรงกันระหว่างเอกสาร: {diff_desc}")
+
+        # Volume Check across PL, BL
+        elif "volume" in f_lower or "cbm" in f_lower:
+            vol_docs = {c: v for c, v in active_vals.items() if c in ["pl", "bl"]}
+            num_map = {c: extract_numeric(v.replace(",", "")) for c, v in vol_docs.items() if extract_numeric(v.replace(",", "")) is not None}
+            vals = list(num_map.values())
+            if len(vals) > 1 and (max(vals) - min(vals)) > 0.01:
+                for c in vol_docs:
+                    val = str(row.get(c, "")).strip()
+                    if val and not val.startswith("⚠️"):
+                        row[c] = f"⚠️ {val}"
+                diff_desc = " vs ".join(f"{c.upper()} ({vol_docs[c]})" for c in vol_docs)
+                added_en.append(f"Volume (CBM) mismatch: {diff_desc}.")
+                added_th.append(f"ปริมาตรสินค้า (Volume) ไม่ตรงกัน: {diff_desc}")
+
+    return added_en, added_th
 
 
 def reconcile_discrepancies(data: dict) -> dict:
     rows = data.get("audit_table", [])
-    summaries = data.get("discrepancy_summary", [])
-    if not isinstance(summaries, list) or not rows:
-        return data
 
-    for summary in summaries:
-        target_docs = [col for col, pat in DOC_PATTERNS.items() if re.search(pat, summary, re.I)]
-        cols = target_docs if target_docs else ["ci", "pl", "bl", "co", "master_db"]
+    # 1. Clean any raw ⚠️ prefixes so we start from a clean baseline
+    for row in rows:
+        for col in ["ci", "pl", "bl", "co", "master_db"]:
+            val = str(row.get(col, "")).strip()
+            if val.startswith("⚠️"):
+                row[col] = re.sub(r"^⚠️\s*", "", val)
 
-        for row in rows:
-            fname = str(row.get("field", ""))
-            is_match = any(
-                re.search(f_pat, fname, re.I) and re.search(s_pat or f_pat, summary, re.I)
-                for f_pat, s_pat, _ in FIELD_DEFINITIONS
-            )
-            if is_match:
-                for col in cols:
-                    val = str(row.get(col, "")).strip()
-                    if val and val != "-" and not val.startswith("⚠️"):
-                        row[col] = f"⚠️ {val}"
+    # 2. Reconcile ONLY using the English summary to prevent Thai substring collisions
+    raw_en = data.get("discrepancy_summary_en") or data.get("discrepancy_summary", [])
+    summaries = raw_en if isinstance(raw_en, list) else ([raw_en] if raw_en else [])
+
+    if summaries and rows:
+        for summary in summaries:
+            target_docs = [col for col, pat in DOC_PATTERNS.items() if re.search(pat, summary, re.I)]
+            cols = target_docs if target_docs else ["ci", "pl", "bl", "co", "master_db"]
+
+            for row in rows:
+                fname = str(row.get("field", ""))
+                key, _, _ = get_field_info(fname)
+                pat = SUMMARY_PATTERNS.get(key)
+                if pat and re.search(pat, summary, re.I):
+                    for col in cols:
+                        val = str(row.get(col, "")).strip()
+                        if val and val != "-" and not val.startswith("⚠️"):
+                            row[col] = f"⚠️ {val}"
+
+    # 3. Deterministic cross-checks on weights, volumes, and shipper names
+    auto_en, auto_th = run_deterministic_audit(rows)
+
+    s_en = data.setdefault("discrepancy_summary_en", [])
+    s_th = data.setdefault("discrepancy_summary_th", [])
+
+    for e in auto_en:
+        if e not in s_en:
+            s_en.append(e)
+    for t in auto_th:
+        if t not in s_th:
+            s_th.append(t)
 
     return data
 
-class LogisticsAuditorApp:
-    """Desktop GUI with 18-row auditing, auto-updates, and bilingual support."""
 
+class LogisticsAuditorApp:
     def __init__(self) -> None:
         self.root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
         self.root.geometry("860x580")
@@ -226,9 +409,9 @@ class LogisticsAuditorApp:
 
         self._check_updates_background()
 
-    def _t(self, key: str) -> str:
-        lang = "th" if self.use_thai.get() else "en"
-        return UI_TEXT[lang].get(key, key)
+    def _t(self, key: str, lang: str | None = None) -> str:
+        selected_lang = lang or ("th" if self.use_thai.get() else "en")
+        return UI_TEXT[selected_lang].get(key, key)
 
     def _build_layout(self) -> None:
         frame = ttk.Frame(self.root, padding=16)
@@ -296,24 +479,25 @@ class LogisticsAuditorApp:
 
     def _show_about_dialog(self) -> None:
         lang = "th" if self.use_thai.get() else "en"
-        messagebox.showinfo(self._t("about_title"), _get_about_text(lang))
+        messagebox.showinfo(self._t("about_title", lang), _get_about_text(lang))
 
     def _update_ui_language(self) -> None:
-        self.root.title(self._t("app_title"))
-        self.title_label.config(text=self._t("header_title"))
-        self.recent_btn.config(text=self._t("recent_btn"))
-        self.new_btn.config(text=self._t("new_btn"))
-        self.about_btn.config(text=self._t("about_btn"))
-        self.hint_label.config(text=self._t("hint"))
-        self.drop_zone.config(text=self._t("drop_zone"))
-        self.chk_thai.config(text=self._t("chk_thai"))
-        self.footer_label.config(text=self._t("company_footer"))
+        lang = "th" if self.use_thai.get() else "en"
+        self.root.title(self._t("app_title", lang))
+        self.title_label.config(text=self._t("header_title", lang))
+        self.recent_btn.config(text=self._t("recent_btn", lang))
+        self.new_btn.config(text=self._t("new_btn", lang))
+        self.about_btn.config(text=self._t("about_btn", lang))
+        self.hint_label.config(text=self._t("hint", lang))
+        self.drop_zone.config(text=self._t("drop_zone", lang))
+        self.chk_thai.config(text=self._t("chk_thai", lang))
+        self.footer_label.config(text=self._t("company_footer", lang))
 
         if self._latest_ver:
-            self.update_btn.config(text=self._t("update_btn").format(ver=self._latest_ver))
+            self.update_btn.config(text=self._t("update_btn", lang).format(ver=self._latest_ver))
 
         if not self._busy:
-            self.status.set(self._t("ready"))
+            self.status.set(self._t("ready", lang))
 
     def _check_updates_background(self) -> None:
         def _worker():
@@ -326,13 +510,25 @@ class LogisticsAuditorApp:
         threading.Thread(target=_worker, daemon=True).start()
 
     def _reveal_update_button(self) -> None:
-        btn_text = self._t("update_btn").format(ver=self._latest_ver)
+        lang = "th" if self.use_thai.get() else "en"
+        btn_text = self._t("update_btn", lang).format(ver=self._latest_ver)
         self.update_btn.config(text=btn_text)
         self.update_btn.pack(side=tk.LEFT, padx=3, before=self.recent_btn)
 
     def _start_update_flow(self) -> None:
-        title = self._t("update_prompt_title")
-        msg = self._t("update_prompt_msg").format(ver=self._latest_ver)
+        lang = "th" if self.use_thai.get() else "en"
+
+        if not getattr(sys, "frozen", False):
+            msg = (
+                f"A new release ({self._latest_ver}) is available on GitHub.\n\n"
+                "In-app auto-updating only runs inside the compiled .exe application, "
+                "not when running from Python source code."
+            )
+            messagebox.showinfo("Update Notice", msg)
+            return
+
+        title = self._t("update_prompt_title", lang)
+        msg = self._t("update_prompt_msg", lang).format(ver=self._latest_ver)
         if not messagebox.askyesno(title, msg):
             return
 
@@ -342,7 +538,7 @@ class LogisticsAuditorApp:
         def _worker():
             try:
                 def on_progress(pct: int):
-                    self._set_status(self._t("updating_status").format(pct=pct))
+                    self._set_status(self._t("updating_status", lang).format(pct=pct))
 
                 apply_update_and_restart(
                     self._download_url,
@@ -350,9 +546,10 @@ class LogisticsAuditorApp:
                     progress_callback=on_progress,
                 )
             except Exception as exc:
-                self.root.after(0, lambda: messagebox.showerror("Update Error", str(exc)))
+                err_text = str(exc)
+                self.root.after(0, lambda msg=err_text: messagebox.showerror("Update Error", msg))
                 self._busy = False
-                self.update_btn.config(state="normal")
+                self.root.after(0, lambda: self.update_btn.config(state="normal"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -364,7 +561,8 @@ class LogisticsAuditorApp:
         paths = self._parse_dropped_paths(event.data)
         pdfs = [path for path in paths if path.suffix.lower() == ".pdf"]
         if not pdfs:
-            messagebox.showwarning(self._t("no_pdf_title"), self._t("no_pdf_msg"))
+            lang = "th" if self.use_thai.get() else "en"
+            messagebox.showwarning(self._t("no_pdf_title", lang), self._t("no_pdf_msg", lang))
             return
         self._start_jobs(pdfs)
 
@@ -376,8 +574,9 @@ class LogisticsAuditorApp:
         return [Path(item.strip("{}")) for item in raw_items if item.strip()]
 
     def _browse_files(self) -> None:
+        lang = "th" if self.use_thai.get() else "en"
         filenames = filedialog.askopenfilenames(
-            title=self._t("browse_title"),
+            title=self._t("browse_title", lang),
             filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
         )
         if filenames:
@@ -385,14 +584,7 @@ class LogisticsAuditorApp:
 
     def _generate_report_name(self, result_str: str) -> str:
         shipper_name = ""
-        try:
-            data = json.loads(result_str)
-        except Exception:
-            clean_str = result_str.replace("```json", "").replace("```", "").strip()
-            try:
-                data = json.loads(clean_str)
-            except Exception:
-                data = {}
+        data = parse_audit_json(result_str)
 
         rows = data.get("audit_table", [])
         for item in rows:
@@ -425,19 +617,20 @@ class LogisticsAuditorApp:
         return files[:5]
 
     def _show_recent_audits(self) -> None:
+        lang = "th" if self.use_thai.get() else "en"
         recent_files = self._get_recent_audit_files()
         if not recent_files:
-            messagebox.showinfo(self._t("no_recent_title"), self._t("no_recent_msg"))
+            messagebox.showinfo(self._t("no_recent_title", lang), self._t("no_recent_msg", lang))
             return
 
         popup = tk.Toplevel(self.root)
-        popup.title(self._t("recent_title"))
+        popup.title(self._t("recent_title", lang))
         popup.geometry("580x380")
         popup.resizable(False, False)
 
         ttk.Label(
             popup,
-            text=self._t("recent_heading"),
+            text=self._t("recent_heading", lang),
             font=("Segoe UI", 11, "bold"),
         ).pack(anchor=tk.W, padx=16, pady=(14, 6))
 
@@ -461,7 +654,7 @@ class LogisticsAuditorApp:
         def open_selected() -> None:
             selection = listbox.curselection()
             if not selection:
-                messagebox.showwarning(self._t("select_warn_title"), self._t("select_warn_msg"))
+                messagebox.showwarning(self._t("select_warn_title", lang), self._t("select_warn_msg", lang))
                 return
             selected_path = file_map[selection[0]]
             try:
@@ -474,12 +667,13 @@ class LogisticsAuditorApp:
         btn_frame = ttk.Frame(popup, padding=12)
         btn_frame.pack(fill=tk.X)
 
-        ttk.Button(btn_frame, text=self._t("open_btn"), command=open_selected).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btn_frame, text=self._t("cancel_btn"), command=popup.destroy).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_frame, text=self._t("open_btn", lang), command=open_selected).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_frame, text=self._t("cancel_btn", lang), command=popup.destroy).pack(side=tk.RIGHT, padx=4)
 
     def _start_jobs(self, pdf_paths: list[Path]) -> None:
+        lang = "th" if self.use_thai.get() else "en"
         if self._busy:
-            messagebox.showinfo(self._t("busy_title"), self._t("busy_msg"))
+            messagebox.showinfo(self._t("busy_title", lang), self._t("busy_msg", lang))
             return
         self._busy = True
         threading.Thread(target=self._run_jobs, args=(pdf_paths,), daemon=True).start()
@@ -490,23 +684,23 @@ class LogisticsAuditorApp:
     def _run_jobs(self, pdf_paths: list[Path]) -> None:
         errors: list[str] = []
         saved: list[Path] = []
-        is_thai = self.use_thai.get()
+        lang = "th" if self.use_thai.get() else "en"
         try:
-            self._set_status(self._t("status_db"))
+            self._set_status(self._t("status_db", lang))
             master_excerpt = load_master_database_excerpt()
 
             all_jpegs: list[Path] = []
             for pdf_path in pdf_paths:
-                self._set_status(self._t("status_flatten").format(name=pdf_path.name))
+                self._set_status(self._t("status_flatten", lang).format(name=pdf_path.name))
                 all_jpegs.extend(flatten_pdf_to_jpegs(pdf_path))
 
-            self._set_status(self._t("status_upload").format(count=len(all_jpegs)))
+            self._set_status(self._t("status_upload", lang).format(count=len(all_jpegs)))
 
             result_str = extract_from_jpegs(
                 pdf_path=pdf_paths[0],
                 jpeg_paths=all_jpegs,
                 master_db_excerpt=master_excerpt,
-                use_thai=is_thai,
+                use_thai=False,
                 status_callback=self._set_status,
             )
 
@@ -517,15 +711,15 @@ class LogisticsAuditorApp:
             result_path = save_markdown(report_path, result_str, out_dir)
             saved.append(result_path)
 
-            self._set_status(self._t("status_saved").format(name=result_path.name))
+            self._set_status(self._t("status_saved", lang).format(name=result_path.name))
             self.root.after(0, lambda: self.display_audit_results(report_name, result_str))
 
             def finish() -> None:
                 self._busy = False
                 if saved and not errors:
-                    self.status.set(self._t("status_success").format(name=report_name))
+                    self.status.set(self._t("status_success", lang).format(name=report_name))
                 elif errors:
-                    self.status.set(self._t("status_failed"))
+                    self.status.set(self._t("status_failed", lang))
                     messagebox.showerror("Error", "\n".join(errors))
 
             self.root.after(0, finish)
@@ -542,34 +736,34 @@ class LogisticsAuditorApp:
             self.root.after(0, fail)
 
     def display_audit_results(self, pdf_name: str, result_str: str) -> None:
-        is_thai = self.use_thai.get()
+        """Render results grid directly below top bar with all 18 rows aligned."""
         popup = tk.Toplevel(self.root)
-        popup.title(self._t("audit_popup_title").format(name=pdf_name))
-        popup.geometry("1300x800")
+        popup.geometry("1320x820")
 
-        try:
-            data = json.loads(result_str)
-        except Exception:
-            clean_str = result_str.replace("```json", "").replace("```", "").strip()
-            try:
-                data = json.loads(clean_str)
-            except Exception:
-                data = {}
-
+        popup_lang = BooleanVar(value=self.use_thai.get())
+        data = parse_audit_json(result_str)
         data = reconcile_discrepancies(data)
 
-        top_frame = ttk.Frame(popup)
-        top_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
+        # 1. Header Control Bar (Fixed height, no expansion)
+        top_bar = ttk.Frame(popup, padding=(14, 8, 14, 4))
+        top_bar.pack(fill=tk.X, expand=False)
 
-        lang = "th" if is_thai else "en"
-        headers = UI_TEXT[lang]["headers"]
+        title_lbl = ttk.Label(top_bar, font=("Segoe UI", 12, "bold"))
+        title_lbl.pack(side=tk.LEFT)
 
-        canvas = tk.Canvas(top_frame, bg="#f1f5f9", highlightthickness=0)
-        v_scroll = ttk.Scrollbar(top_frame, orient=tk.VERTICAL, command=canvas.yview)
-        h_scroll = ttk.Scrollbar(top_frame, orient=tk.HORIZONTAL, command=canvas.xview)
+        lang_chk = ttk.Checkbutton(top_bar, variable=popup_lang)
+        lang_chk.pack(side=tk.RIGHT)
+
+        # 2. Main Table Area (Directly below header bar, takes remaining space)
+        table_frame = ttk.Frame(popup, padding=(12, 4, 12, 6))
+        table_frame.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(table_frame, bg="#f1f5f9", highlightthickness=0)
+        v_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=canvas.yview)
+        h_scroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=canvas.xview)
         grid_container = tk.Frame(canvas, bg="#cbd5e1")
 
-        def _update_scrollregion(event):
+        def _update_scrollregion(event=None):
             canvas.configure(scrollregion=canvas.bbox("all"))
 
         grid_container.bind("<Configure>", _update_scrollregion)
@@ -582,11 +776,11 @@ class LogisticsAuditorApp:
         canvas.bind("<Enter>", lambda _: canvas.bind_all("<MouseWheel>", _on_mousewheel))
         canvas.bind("<Leave>", lambda _: canvas.unbind_all("<MouseWheel>"))
 
-        for col_idx, header_text in enumerate(headers):
-            col_width = 24 if col_idx == 0 else 22
+        header_label_widgets: list[tk.Label] = []
+        for col_idx in range(6):
+            col_width = 25 if col_idx == 0 else 22
             hdr = tk.Label(
                 grid_container,
-                text=header_text,
                 font=("Segoe UI", 9, "bold"),
                 bg="#e2e8f0",
                 fg="#1e293b",
@@ -597,14 +791,16 @@ class LogisticsAuditorApp:
                 relief=tk.FLAT,
             )
             hdr.grid(row=0, column=col_idx, sticky="nsew", padx=1, pady=1)
+            header_label_widgets.append(hdr)
 
         rows = data.get("audit_table", [])
+        row_field_widgets: list[tuple[tk.Label, str]] = []
+
         for row_idx, item in enumerate(rows, start=1):
             raw_field = str(item.get("field", "-"))
-            field_display = _translate_field_to_thai(raw_field) if is_thai else raw_field
 
             cells = [
-                field_display,
+                raw_field,
                 str(item.get("ci", "-")),
                 str(item.get("pl", "-")),
                 str(item.get("bl", "-")),
@@ -615,7 +811,7 @@ class LogisticsAuditorApp:
             row_has_error = any("⚠️" in c or "[Printed as: BLANK/MISSING]" in c for c in cells[1:])
 
             for col_idx, cell_val in enumerate(cells):
-                col_width = 24 if col_idx == 0 else 22
+                col_width = 25 if col_idx == 0 else 22
                 is_flagged = ("⚠️" in cell_val or "[Printed as: BLANK/MISSING]" in cell_val) if col_idx > 0 else False
 
                 if is_flagged:
@@ -645,12 +841,15 @@ class LogisticsAuditorApp:
                     wraplength=190,
                 )
                 cell_lbl.grid(row=row_idx, column=col_idx, sticky="nsew", padx=1, pady=1)
+                if col_idx == 0:
+                    row_field_widgets.append((cell_lbl, raw_field))
 
         v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        bottom_frame = ttk.LabelFrame(popup, text=self._t("summary_title"), padding=10)
+        # 3. Discrepancy Summary Box (Docked at bottom)
+        bottom_frame = ttk.LabelFrame(popup, padding=10)
         bottom_frame.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0, 10))
 
         summary_text = tk.Text(
@@ -668,22 +867,60 @@ class LogisticsAuditorApp:
         summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         watermark = str(data.get("watermark_warning", "None"))
-        summaries = data.get("discrepancy_summary", [])
+        summary_en = data.get("discrepancy_summary_en") or data.get("discrepancy_summary", [])
+        summary_th = data.get("discrepancy_summary_th") or data.get("discrepancy_summary", [])
 
-        summary_content = ""
-        if watermark and watermark.lower() not in ("none", "null", ""):
-            wm_label = self._t("watermark_label")
-            summary_content += f"{wm_label} {watermark}\n\n"
+        def refresh_popup_language():
+            lang = "th" if popup_lang.get() else "en"
 
-        if isinstance(summaries, list) and summaries:
-            summary_content += "\n".join(f"• {s}" for s in summaries)
-        elif isinstance(summaries, str) and summaries:
-            summary_content += summaries
-        else:
-            summary_content += self._t("no_discrepancy")
+            if self.use_thai.get() != popup_lang.get():
+                self.use_thai.set(popup_lang.get())
+                self._update_ui_language()
 
-        summary_text.insert("1.0", summary_content)
-        summary_text.config(state="disabled")
+            popup.title(self._t("audit_popup_title", lang).format(name=pdf_name))
+            title_lbl.config(text=self._t("audit_popup_title", lang).format(name=pdf_name))
+            lang_chk.config(text=self._t("chk_thai", lang))
+
+            headers = UI_TEXT[lang]["headers"]
+            for idx, h_widget in enumerate(header_label_widgets):
+                h_widget.config(text=headers[idx])
+
+            for lbl_widget, raw_f in row_field_widgets:
+                _, en_lbl, th_lbl = get_field_info(raw_f)
+                lbl_widget.config(text=th_lbl if lang == "th" else en_lbl)
+
+            bottom_frame.config(text=self._t("summary_title", lang))
+
+            nonlocal summary_en, summary_th
+            active_en = summary_en if summary_en else summary_th
+            active_th = summary_th if summary_th else summary_en
+            active_summary = active_th if lang == "th" else active_en
+
+            summary_content = ""
+            if watermark and watermark.lower() not in ("none", "null", ""):
+                wm_label = self._t("watermark_label", lang)
+                summary_content += f"{wm_label} {watermark}\n\n"
+
+            if isinstance(active_summary, list) and active_summary:
+                summary_content += "\n".join(f"• {s}" for s in active_summary)
+            elif isinstance(active_summary, str) and active_summary:
+                summary_content += active_summary
+            else:
+                summary_content += self._t("no_discrepancy", lang)
+
+            summary_text.config(state="normal")
+            summary_text.delete("1.0", tk.END)
+            summary_text.insert("1.0", summary_content)
+            summary_text.config(state="disabled")
+
+        lang_chk.config(command=refresh_popup_language)
+        refresh_popup_language()
+
+        # Ensure viewport opens cleanly at top-left
+        popup.update_idletasks()
+        _update_scrollregion()
+        canvas.yview_moveto(0)
+        canvas.xview_moveto(0)
 
     def run(self) -> None:
         self.root.mainloop()
