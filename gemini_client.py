@@ -1,10 +1,12 @@
-"""Gemini Vision client for multimodal logistics document extraction and reporting."""
+"""Gemini Vision client with dynamic model discovery, jittered backoff, and robust error trapping."""
 
 from __future__ import annotations
 
+import random
 import time
 from pathlib import Path
 from typing import Callable
+
 from google import genai
 from google.genai import types
 
@@ -17,6 +19,20 @@ from config import (
 )
 
 
+def _get_live_fallback_models(client: genai.Client) -> list[str]:
+    """Query Google API for any currently active generateContent models as an emergency fallback."""
+    try:
+        available: list[str] = []
+        for m in client.models.list():
+            name = m.name.replace("models/", "")
+            actions = getattr(m, "supported_actions", []) or []
+            if "generateContent" in actions and "flash" in name.lower() and "preview" not in name.lower():
+                available.append(name)
+        return available
+    except Exception:
+        return []
+
+
 def extract_from_jpegs(
     pdf_path: Path,
     jpeg_paths: list[Path],
@@ -24,19 +40,22 @@ def extract_from_jpegs(
     use_thai: bool = False,
     status_callback: Callable[[str], None] | None = None,
 ) -> str:
-    """Upload JPEGs to Gemini Vision with pure English table extraction and bilingual summaries."""
+    """Upload JPEGs to Gemini Vision with jittered retry and dynamic self-healing cascade."""
     if not jpeg_paths:
         raise ValueError("No JPEG images were provided for extraction.")
 
-    # Strict 30-second HTTP request timeout
+    api_key = get_gemini_api_key()
+    if not api_key:
+        raise RuntimeError("No Gemini API key found. Please configure your key in Settings.")
+
     client = genai.Client(
-        api_key=get_gemini_api_key(),
-        http_options=types.HttpOptions(timeout=30000),
+        api_key=api_key,
+        http_options=types.HttpOptions(timeout=60000),
     )
 
     uploaded_files = []
     try:
-        # 1. Upload page JPEGs (status messages respect UI language)
+        # 1. Upload page JPEGs
         for i, img_path in enumerate(jpeg_paths, start=1):
             if status_callback:
                 msg = (
@@ -48,7 +67,6 @@ def extract_from_jpegs(
             f = client.files.upload(file=img_path)
             uploaded_files.append(f)
 
-        # 2. Prompt Gemini in 100% English (enforces English table + bilingual summaries)
         prompt = USER_PROMPT_TEMPLATE.format(
             pdf_name=pdf_path.name,
             page_count=len(jpeg_paths),
@@ -56,17 +74,20 @@ def extract_from_jpegs(
             master_db_excerpt=master_db_excerpt,
         )
 
-        last_error: Exception | None = None
+        cascade_errors: list[str] = []
+        attempt_models = list(MODEL_CASCADE)
 
-        # 3. Model cascade with transient 503/429 retries
-        for model_name in MODEL_CASCADE:
-            for attempt in range(2):
+        # 2. Iterate cascade with jittered exponential backoff
+        for model_name in attempt_models:
+            max_attempts = 2
+            for attempt in range(max_attempts):
                 try:
                     if status_callback:
+                        retry_info = f" (Attempt {attempt + 1})" if attempt > 0 else ""
                         msg = (
-                            f"กำลังตรวจสอบด้วย {model_name}..."
+                            f"กำลังตรวจสอบด้วย {model_name}{retry_info}..."
                             if use_thai
-                            else f"Auditing with {model_name}..."
+                            else f"Auditing with {model_name}{retry_info}..."
                         )
                         status_callback(msg)
 
@@ -83,29 +104,31 @@ def extract_from_jpegs(
                     )
                     text = (getattr(response, "text", None) or "").strip()
                     if not text:
-                        raise RuntimeError("Gemini returned an empty response.")
+                        raise RuntimeError(f"{model_name} returned an empty response.")
                     return text
 
                 except Exception as exc:
-                    last_error = exc
                     err_str = str(exc)
 
-                    # Check for transient demand or rate spikes
+                    # Transient demand spike or rate limit
                     is_transient = any(
                         token in err_str
-                        for token in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]
+                        for token in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED"]
                     )
 
-                    if is_transient and attempt == 0:
+                    if is_transient and attempt < max_attempts - 1:
+                        sleep_time = round(2.0 * (2 ** attempt) + random.uniform(0.5, 1.5), 1)
                         if status_callback:
-                            retry_msg = (
-                                f"{model_name} กำลังมีผู้ใช้งานหนาแน่น (503/429) รอ 3 วินาทีเพื่อลองใหม่..."
+                            msg = (
+                                f"{model_name} ผู้ใช้งานหนาแน่น (503/429) รอ {sleep_time} วินาที..."
                                 if use_thai
-                                else f"{model_name} busy/rate-limited (503/429). Retrying in 3s..."
+                                else f"{model_name} busy (503/429). Retrying in {sleep_time}s..."
                             )
-                            status_callback(retry_msg)
-                        time.sleep(3)
+                            status_callback(msg)
+                        time.sleep(sleep_time)
                         continue
+
+                    cascade_errors.append(f"• [{model_name}]: {err_str}")
 
                     if status_callback:
                         switch_msg = (
@@ -116,7 +139,32 @@ def extract_from_jpegs(
                         status_callback(switch_msg)
                     break
 
-        raise RuntimeError(f"All models in cascade failed. Last error: {last_error}")
+        # 3. Emergency Safety Net: Query live models if all preconfigured models failed
+        live_fallbacks = [m for m in _get_live_fallback_models(client) if m not in attempt_models]
+        for fallback_model in live_fallbacks:
+            try:
+                if status_callback:
+                    status_callback(f"Connecting to live fallback: {fallback_model}...")
+
+                response = client.models.generate_content(
+                    model=fallback_model,
+                    contents=[prompt, *uploaded_files],
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION,
+                        response_mime_type="application/json",
+                        temperature=0.1,
+                        top_p=0.95,
+                        max_output_tokens=8192,
+                    ),
+                )
+                text = (getattr(response, "text", None) or "").strip()
+                if text:
+                    return text
+            except Exception as exc:
+                cascade_errors.append(f"• [{fallback_model}]: {exc}")
+
+        error_summary = "\n\n".join(cascade_errors)
+        raise RuntimeError(f"All models in cascade failed:\n\n{error_summary}")
 
     finally:
         for f in uploaded_files:

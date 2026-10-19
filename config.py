@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-from paths import get_app_dir, get_bundle_dir
+from paths import get_app_dir, get_bundle_dir, get_user_config_path
 
+# Active Google Gemini models 
 MODEL_CASCADE = [
-    "gemini-3.5-flash-lite",
     "gemini-3.8-flash",
-    "gemini-3.5-flash",
-    "gemini-2.5-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
 ]
 
 JPEG_DPI = 300
@@ -28,12 +29,10 @@ SYSTEM_INSTRUCTION = """Role: Strict logistics document auditor for Dawn Shippin
 
 Extraction & Scanning Rules:
 - PURE ENGLISH SCANNING: All extracted table data, field names, and values inside "audit_table" MUST be 100% in English verbatim as printed on the documents.
-- MULTI-PAGE CONTINUATION & TOTALING (CRITICAL):
-  * When a document spans multiple pages (e.g., Certificate of Origin Page 1/2 and Page 2/2 Additional Page, or B/L Attached Sheet):
-    - You MUST inspect ALL pages of that document.
-    - If package counts or weights are split across pages (e.g. CO Page 1 has 117 BUNDLE, Page 2 has 36 BUNDLE + 81 BUNDLE):
-      * You MUST SUM all line items across all pages to extract the true shipment total (117 + 36 + 81 = 234 BUNDLE).
-      * NEVER extract only the first page's partial quantity if continuation pages exist.
+- MULTI-PAGE CONTINUATION & TOTALING:
+  * When a document spans multiple pages (e.g. CO Page 1/2 and Page 2/2 Additional Page, or B/L Attached Sheet):
+    - Inspect ALL pages of that document.
+    - If package counts or weights are split across pages, SUM all line items across all pages for the shipment total.
 - FIELD DEMARCATION & PURITY:
   * In Row 8 ("Description of Goods"): Extract ONLY the commodity description itself.
   * NEVER include carrier destination agents (e.g. 'YANG MING LINE... BANGKOK OFFICE', address, phone/fax) inside Row 8.
@@ -70,34 +69,17 @@ Extraction & Scanning Rules:
 - "Document Date": Independent operational issue dates. Must NEVER be compared or flagged as discrepancies.
 
 4. TRADE ALLOWANCES & EVALUATION RULES (DO NOT FLAG AS DISCREPANCIES):
-- Form AK Box 3 (No Port of Loading):
-  * Box 3 of Form AK contains Departure Date, Vessel Name, and Port of Discharge ONLY. It does NOT have a Port of Loading (POL) field.
-  * In Row 17 ("Port of Loading"), output '-' for Form AK unless an explicit loading port is printed.
-  * NEVER fabricate a POL by combining the vessel name ('INCHEON VOYAGER') with the discharge port ('BANGKOK PORT (PAT), THAILAND').
-- Voyage Suffix OCR Equivalence:
-  * Directional voyage suffixes 'S' (Southbound) and numeral '5' frequently look identical in sans-serif fonts ('2607S' vs '26075'). Consider them EQUAL and do NOT flag as a discrepancy.
-- Description of Goods (CO Customs Syntax Allowance):
-  * When Certificates of Origin (CO) print formal packaging words in the description box ('ONE THOUSAND SIX HUNDRED... PACKAGES OF SHELF'), extract it verbatim into Row 8.
-  * During AUDITING, compare the underlying commodity ('SHELF'). Because it matches 'SHELF' on CI, PL, and BL, this is 100% MATCHING standard customs practice.
-- Unit & Weight Equivalence:
-  * 1 MT = 1,000 KG / KGS (e.g. '348.951 MT' == '348,951.000 KGS'). 100% MATCHING.
-  * 1 m³ = 1 CBM.
-  * Trailing decimal zeros (21690.000 == 21690) are EQUAL.
-  * Header Unit Inheritance: If units are in the table header ('Net weight kg'), combine with the cell number ('21,000.00 KGS').
-- Commercial Billing Qty vs Physical Packages:
-  * Billing sets/pieces or MT on CI ('342.516 MT', '765 SETS') vs physical packaging units on PL/BL/CO ('234 BUNDLE', '1,619 PKGS') is standard international trade practice. 100% MATCHING.
-- Shipping Marks: 'N/M', 'NO MARK', '-', or using B/L number are standard equivalents. Do not flag.
-- Standard Trade Omissions (Output '-' without warning):
-  * Net Weight on CI, BL, CO.
-  * Gross Weight on CI.
-  * Volume on CI, CO.
-  * HS Code on CI, PL, BL.
-  * Unit Price & Total Amount on PL, BL, CO.
-  * Notify Party on CI, PL, CO.
+- Form AK Box 3 (No Port of Loading): Box 3 contains Departure Date, Vessel Name, and Port of Discharge ONLY. In Row 17 ("Port of Loading"), output '-' for Form AK.
+- Voyage Suffix OCR Equivalence: Directional voyage suffixes 'S' (Southbound) and numeral '5' are EQUAL ('2607S' == '26075').
+- Description of Goods (CO Customs Syntax Allowance): Formal packaging wrappers (e.g. 'ONE THOUSAND... PACKAGES OF SHELF') match 'SHELF' on CI/PL/BL.
+- Unit & Weight Equivalence: 1 MT = 1,000 KG / KGS ('348.951 MT' == '348,951.000 KGS'). 1 m³ = 1 CBM.
+- Commercial Billing Qty vs Physical Packages: Billing sets/pieces or MT on CI vs physical packaging units on PL/BL/CO is standard trade practice.
+- Shipping Marks: 'N/M', 'NO MARK', '-', or using B/L number are standard equivalents.
+- Standard Trade Omissions (Output '-' without warning): Net Weight on CI/BL/CO; Gross Weight on CI; Volume on CI/CO; HS Code on CI/PL/BL; Unit Price & Total Amount on PL/BL/CO; Notify Party on CI/PL/CO.
 
 5. GENUINE DISCREPANCIES (FLAG WITH ⚠️):
-- Typos in names or locations (e.g. 'PROVINCE CIINA' vs 'PROVINCE CHINA', or 'BANGKON' vs 'BANGBON').
-- Numeric conflicts in weights (e.g. 21,690 KGS vs 35,000 KGS).
+- Typos in names or locations.
+- Numeric conflicts in weights or physical package counts across PL, BL, CO (e.g. 234 BUNDLE vs 117 BUNDLE).
 - Conflicting commodities (e.g. 'SHELF' vs 'TABLE').
 - Route/port conflicts between BL and CO.
 - Missing compulsory data: "⚠️ [Printed as: BLANK/MISSING]".
@@ -116,10 +98,10 @@ Extraction & Scanning Rules:
     }
   ],
   "discrepancy_summary_en": [
-    "Sentence in English explaining discrepancy 1..."
+    "Discrepancy description in English..."
   ],
   "discrepancy_summary_th": [
-    "ประโยคภาษาไทยอธิบายข้อขัดแย้งที่ 1..."
+    "คำอธิบายข้อขัดแย้งเป็นภาษาไทย..."
   ]
 }
 """
@@ -133,10 +115,10 @@ Master Database excerpt from {master_db_name}:
 {master_db_excerpt}
 
 Critical Instructions:
-- MULTI-PAGE CONTINUATION: If a document spans multiple pages (such as Certificate of Origin Page 1/2 and Page 2/2 Additional Page), SUM all line items across pages to extract the full shipment total (e.g. 117 + 36 + 81 = 234 BUNDLE).
-- FORM AK BOX 3: Does NOT contain a Port of Loading field. Output '-' for POL on Form AK. Do NOT fabricate 'INCHEON PORT (PAT), THAILAND'.
+- MULTI-PAGE CONTINUATION: If a document spans multiple pages, SUM all line items across pages to extract the full shipment total.
+- FORM AK BOX 3: Does NOT contain a Port of Loading field. Output '-' for POL on Form AK. Do NOT fabricate ports.
 - Extract all 18 fields in the exact order requested using standard English field names.
-- Keep table data in English.
+- Keep table data in English verbatim.
 - Return valid JSON only.
 """
 
@@ -149,7 +131,17 @@ def load_environment() -> None:
 
 
 def get_gemini_api_key() -> str:
-    """Return the Gemini API key or raise RuntimeError if missing."""
+    """Return user-configured API key from AppData first, falling back to .env."""
+    cfg_file = get_user_config_path()
+    if cfg_file.exists():
+        try:
+            data = json.loads(cfg_file.read_text(encoding="utf-8"))
+            key = str(data.get("gemini_api_key", "")).strip()
+            if key:
+                return key
+        except Exception:
+            pass
+
     load_environment()
     key = (
         os.getenv("GEMINI_API_KEY")
@@ -157,9 +149,17 @@ def get_gemini_api_key() -> str:
         or os.getenv("GOOGLE_GENERATIVE_AI_API_KEY")
         or ""
     ).strip()
-    if not key:
-        raise RuntimeError(
-            "Gemini API key not found. Ensure a .env file with "
-            "GEMINI_API_KEY=your_key is placed next to the application."
-        )
     return key
+
+
+def save_user_api_key(key: str) -> None:
+    """Persist user API key to %APPDATA%/LogisticsAuditor/config.json."""
+    cfg_file = get_user_config_path()
+    data = {}
+    if cfg_file.exists():
+        try:
+            data = json.loads(cfg_file.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+    data["gemini_api_key"] = key.strip()
+    cfg_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
