@@ -1044,51 +1044,57 @@ class LogisticsAuditorApp:
         grid_container = tk.Frame(canvas, bg="#cbd5e1")
 
         def refresh_popup_language():
-            lang = "th" if popup_lang.get() else "en"
+          lang = "th" if popup_lang.get() else "en"
 
-            if self.use_thai.get() != popup_lang.get():
-                self.use_thai.set(popup_lang.get())
-                self._update_ui_language()
+          if self.use_thai.get() != popup_lang.get():
+            self.use_thai.set(popup_lang.get())
+            self._update_ui_language()
 
-            popup.title(
-                self._t("audit_popup_title", lang).format(name=pdf_name)
-            )
-            title_lbl.config(
-                text=self._t("audit_popup_title", lang).format(name=pdf_name)
-            )
-            lang_chk.config(text=self._t("chk_thai", lang))
+          popup.title(self._t("audit_popup_title", lang).format(name=pdf_name))
+          title_lbl.config(
+              text=self._t("audit_popup_title", lang).format(name=pdf_name)
+          )
+          lang_chk.config(text=self._t("chk_thai", lang))
 
-            headers = UI_TEXT[lang]["headers"]
-            for idx, h_widget in enumerate(header_label_widgets):
-                h_widget.config(text=headers[idx])
+          headers = UI_TEXT[lang]["headers"]
+          for idx, h_widget in enumerate(header_label_widgets):
+            h_widget.config(text=headers[idx])
 
-            for lbl_widget, raw_f in row_field_widgets:
-                _, en_lbl, th_lbl = get_field_info(raw_f)
-                lbl_widget.config(text=th_lbl if lang == "th" else en_lbl)
+          for lbl_widget, raw_f in row_field_widgets:
+            _, en_lbl, th_lbl = get_field_info(raw_f)
+            lbl_widget.config(text=th_lbl if lang == "th" else en_lbl)
 
-            bottom_frame.config(text=self._t("summary_title", lang))
+          bottom_frame.config(text=self._t("summary_title", lang))
 
-            nonlocal summary_en, summary_th
-            active_en = summary_en if summary_en else summary_th
-            active_th = summary_th if summary_th else summary_en
-            active_summary = active_th if lang == "th" else active_en
+          # Read directly from parsed data without nonlocal scoping
+          watermark = str(data.get("watermark_warning", "None"))
+          summary_en = data.get("discrepancy_summary_en") or data.get(
+              "discrepancy_summary", []
+          )
+          summary_th = data.get("discrepancy_summary_th") or data.get(
+              "discrepancy_summary", []
+          )
 
-            summary_content = ""
-            if watermark and watermark.lower() not in ("none", "null", ""):
-                wm_label = self._t("watermark_label", lang)
-                summary_content += f"{wm_label} {watermark}\n\n"
+          active_en = summary_en if summary_en else summary_th
+          active_th = summary_th if summary_th else summary_en
+          active_summary = active_th if lang == "th" else active_en
 
-            if isinstance(active_summary, list) and active_summary:
-                summary_content += "\n".join(f"• {s}" for s in active_summary)
-            elif isinstance(active_summary, str) and active_summary:
-                summary_content += active_summary
-            else:
-                summary_content += self._t("no_discrepancy", lang)
+          summary_content = ""
+          if watermark and watermark.lower() not in ("none", "null", ""):
+            wm_label = self._t("watermark_label", lang)
+            summary_content += f"{wm_label} {watermark}\n\n"
 
-            summary_text.config(state="normal")
-            summary_text.delete("1.0", tk.END)
-            summary_text.insert("1.0", summary_content)
-            summary_text.config(state="disabled")
+          if isinstance(active_summary, list) and active_summary:
+            summary_content += "\n".join(f"• {s}" for s in active_summary)
+          elif isinstance(active_summary, str) and active_summary:
+            summary_content += active_summary
+          else:
+            summary_content += self._t("no_discrepancy", lang)
+
+          summary_text.config(state="normal")
+          summary_text.delete("1.0", tk.END)
+          summary_text.insert("1.0", summary_content)
+          summary_text.config(state="disabled")
 
         lang_chk.config(command=refresh_popup_language)
         refresh_popup_language()

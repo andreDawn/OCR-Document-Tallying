@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from paths import get_app_dir, get_bundle_dir
 
-FALLBACK_VERSION = "1.0.8"
+FALLBACK_VERSION = "1.0.9"
 
 
 def get_current_version() -> str:
