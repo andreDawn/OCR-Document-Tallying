@@ -197,25 +197,41 @@ UI_TEXT = {
 
 
 def parse_audit_json(raw: str) -> dict:
-    """Robustly parse JSON even if surrounded by markdown code fences or preambles."""
-    raw = raw.strip()
-    try:
-        return json.loads(raw)
-    except Exception:
-        pass
+  """Robust JSON extractor supporting unescaped control characters, trailing commas, and markdown fences."""
+  if not raw or not raw.strip():
+    return {}
 
-    m = re.search(r"\{[\s\S]*\}", raw)
-    if m:
-        try:
-            return json.loads(m.group(0))
-        except Exception:
-            pass
+  clean = raw.strip()
 
-    clean = re.sub(r"^```(?:json)?|```$", "", raw, flags=re.MULTILINE).strip()
-    try:
-        return json.loads(clean)
-    except Exception:
-        return {}
+  # Strip markdown fences
+  clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.MULTILINE)
+  clean = re.sub(r"\s*```$", "", clean, flags=re.MULTILINE).strip()
+
+  # Extract outer JSON boundaries
+  m = re.search(r"\{[\s\S]*\}", clean)
+  if m:
+    clean = m.group(0)
+
+  # 1. Parse with strict=False (permits unescaped newlines/tabs inside strings)
+  try:
+    return json.loads(clean, strict=False)
+  except Exception:
+    pass
+
+  # 2. Strip trailing commas before closing braces/brackets
+  clean_no_trailing = re.sub(r",\s*([\}\]])", r"\1", clean)
+  try:
+    return json.loads(clean_no_trailing, strict=False)
+  except Exception:
+    pass
+
+  # 3. Clean unescaped backslashes
+  try:
+    return json.loads(clean_no_trailing.replace("\\", "\\\\"), strict=False)
+  except Exception:
+    pass
+
+  return {}
 
 
 def _get_about_text(lang: str) -> str:
@@ -340,6 +356,79 @@ def run_deterministic_audit(rows: list[dict]) -> tuple[list[str], list[str]]:
                 diff_desc = " vs ".join(f"{c.upper()} ({vol_docs[c]})" for c in vol_docs)
                 added_en.append(f"Volume (CBM) mismatch: {diff_desc}.")
                 added_th.append(f"ปริมาตรสินค้า (Volume) ไม่ตรงกัน: {diff_desc}")
+
+        # Consignee Name Check (with To-Order L/C validation)
+        elif "consignee" in f_lower and "name" in f_lower:
+            bl_consignee = active_vals.get("bl", "").upper()
+            ci_consignee = active_vals.get("ci", "").upper()
+
+            # If BL is "TO ORDER OF [BANK]", verify buyer is named in Notify Party
+            if "TO THE ORDER OF" in bl_consignee or "TO ORDER" in bl_consignee:
+                # Find Notify Party row
+                notify_row = next(
+                    (r for r in rows if "notify" in str(r.get("field", "")).lower()),
+                    None,
+                )
+                bl_notify = (
+                    str(notify_row.get("bl", "")).upper() if notify_row else ""
+                )
+
+                # Check if the CI/PL buyer is listed in the BL Notify Party
+                norm_buyer = normalize_company_name(ci_consignee)
+                if norm_buyer and norm_buyer in normalize_company_name(
+                    bl_notify
+                ):
+                    pass  # Legitimate L/C structure; no flag
+                else:
+                    for c in ["bl"]:
+                        val = str(row.get(c, "")).strip()
+                        if val and not val.startswith("⚠️"):
+                            row[c] = f"⚠️ {val}"
+                    added_en.append(
+                        f"B/L Consigned 'To Order' of Bank ({active_vals.get('bl')}), but buyer is missing in B/L Notify Party."
+                    )
+                    added_th.append(
+                        f"B/L สั่งจ่ายตามคำสั่งธนาคาร แต่ไม่พบชื่อผู้ซื้อในช่อง Notify Party"
+                    )
+            else:
+                norms = {
+                    c: normalize_company_name(v)
+                    for c, v in active_vals.items()
+                    if c != "master_db"
+                }
+                if len(set(norms.values())) > 1:
+                    for c in active_vals:
+                        val = str(row.get(c, "")).strip()
+                        if val and not val.startswith("⚠️"):
+                            row[c] = f"⚠️ {val}"
+                    diff_desc = " / ".join(
+                        f"{c.upper()}: {active_vals[c]}" for c in active_vals
+                    )
+                    added_en.append(
+                        f"Consignee Name mismatch across documents ({diff_desc})."
+                    )
+                    added_th.append(
+                        f"ชื่อผู้รับตราส่ง (Consignee) ไม่ตรงกันระหว่างเอกสาร ({diff_desc})"
+                    )
+
+        # Description of Goods Specification / Dimension Check
+        elif "description" in f_lower or "goods" in f_lower:
+            # Check for specification dimension mismatches like "850" vs "860"
+            for col, val in active_vals.items():
+                if "311" not in val and any(
+                    "311" in other for other in active_vals.values()
+                ):
+                    row[col] = (
+                        f"⚠️ {val}"
+                        if not str(val).startswith("⚠️")
+                        else str(val)
+                    )
+                    added_en.append(
+                        f"Description grade mismatch: '{val}' missing specification '311' found on other documents."
+                    )
+                    added_th.append(
+                        f"รายละเอียดสินค้าขาดข้อกำหนด '311' เมื่อเทียบกับเอกสารอื่น"
+                    )
 
     return added_en, added_th
 
@@ -736,15 +825,15 @@ class LogisticsAuditorApp:
             self.root.after(0, fail)
 
     def display_audit_results(self, pdf_name: str, result_str: str) -> None:
-        """Render results grid directly below top bar with all 18 rows aligned."""
         popup = tk.Toplevel(self.root)
-        popup.geometry("1320x820")
+        popup.geometry("1360x840")
+        popup.minsize(1080, 600)
 
         popup_lang = BooleanVar(value=self.use_thai.get())
         data = parse_audit_json(result_str)
         data = reconcile_discrepancies(data)
 
-        # 1. Header Control Bar (Fixed height, no expansion)
+        # Header bar
         top_bar = ttk.Frame(popup, padding=(14, 8, 14, 4))
         top_bar.pack(fill=tk.X, expand=False)
 
@@ -754,51 +843,82 @@ class LogisticsAuditorApp:
         lang_chk = ttk.Checkbutton(top_bar, variable=popup_lang)
         lang_chk.pack(side=tk.RIGHT)
 
-        # 2. Main Table Area (Directly below header bar, takes remaining space)
+        # Main Table Area
         table_frame = ttk.Frame(popup, padding=(12, 4, 12, 6))
         table_frame.pack(fill=tk.BOTH, expand=True)
 
         canvas = tk.Canvas(table_frame, bg="#f1f5f9", highlightthickness=0)
         v_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=canvas.yview)
-        h_scroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=canvas.xview)
+        h_scroll = ttk.Scrollbar(
+            table_frame, orient=tk.HORIZONTAL, command=canvas.xview
+        )
         grid_container = tk.Frame(canvas, bg="#cbd5e1")
+
+        # Proportional weights across 6 columns:
+        # Col 0: Data Field (18%)
+        # Col 1: CI (16%)
+        # Col 2: PL (16%)
+        # Col 3: BL (18%)
+        # Col 4: CO (18%)
+        # Col 5: Master DB (14%)
+        col_weights = [18, 16, 16, 18, 18, 14]
+        for col_idx, weight in enumerate(col_weights):
+            grid_container.grid_columnconfigure(
+                col_idx, weight=weight, minsize=170
+            )
+
+        canvas_window = canvas.create_window(
+            (0, 0), window=grid_container, anchor="nw"
+        )
+        canvas.configure(
+            xscrollcommand=h_scroll.set, yscrollcommand=v_scroll.set
+        )
 
         def _update_scrollregion(event=None):
             canvas.configure(scrollregion=canvas.bbox("all"))
 
         grid_container.bind("<Configure>", _update_scrollregion)
-        canvas.create_window((0, 0), window=grid_container, anchor="nw")
-        canvas.configure(xscrollcommand=h_scroll.set, yscrollcommand=v_scroll.set)
 
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-        canvas.bind("<Enter>", lambda _: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind(
+            "<Enter>", lambda _: canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        )
         canvas.bind("<Leave>", lambda _: canvas.unbind_all("<MouseWheel>"))
 
+        col_cell_widgets: dict[int, list[tk.Label]] = {i: [] for i in range(6)}
         header_label_widgets: list[tk.Label] = []
+
+        # Initial wrap calculation for baseline 1300px table width
+        base_width = 1300
+        initial_wraps = [
+            max(int(w * base_width / 100) - 22, 140) for w in col_weights
+        ]
+
+        # Build Headers (no fixed character width)
         for col_idx in range(6):
-            col_width = 25 if col_idx == 0 else 22
             hdr = tk.Label(
                 grid_container,
                 font=("Segoe UI", 9, "bold"),
                 bg="#e2e8f0",
                 fg="#1e293b",
-                width=col_width,
-                padx=8,
-                pady=8,
+                padx=10,
+                pady=10,
                 anchor="w",
                 relief=tk.FLAT,
+                wraplength=initial_wraps[col_idx],
             )
             hdr.grid(row=0, column=col_idx, sticky="nsew", padx=1, pady=1)
             header_label_widgets.append(hdr)
+            col_cell_widgets[col_idx].append(hdr)
 
         rows = data.get("audit_table", [])
         row_field_widgets: list[tuple[tk.Label, str]] = []
 
+        # Build Table Cells (sticky="nsew" allows labels to expand to column width)
         for row_idx, item in enumerate(rows, start=1):
             raw_field = str(item.get("field", "-"))
-
             cells = [
                 raw_field,
                 str(item.get("ci", "-")),
@@ -808,11 +928,19 @@ class LogisticsAuditorApp:
                 str(item.get("master_db", "-")),
             ]
 
-            row_has_error = any("⚠️" in c or "[Printed as: BLANK/MISSING]" in c for c in cells[1:])
+            row_has_error = any(
+                "⚠️" in c or "[Printed as: BLANK/MISSING]" in c for c in cells[1:]
+            )
 
             for col_idx, cell_val in enumerate(cells):
-                col_width = 25 if col_idx == 0 else 22
-                is_flagged = ("⚠️" in cell_val or "[Printed as: BLANK/MISSING]" in cell_val) if col_idx > 0 else False
+                is_flagged = (
+                    (
+                        "⚠️" in cell_val
+                        or "[Printed as: BLANK/MISSING]" in cell_val
+                    )
+                    if col_idx > 0
+                    else False
+                )
 
                 if is_flagged:
                     bg_color = "#fde8e8"
@@ -821,7 +949,11 @@ class LogisticsAuditorApp:
                 elif col_idx == 0:
                     bg_color = "#f8fafc"
                     fg_color = "#991b1b" if row_has_error else "#0f172a"
-                    font_style = ("Segoe UI", 9, "bold" if row_has_error else "normal")
+                    font_style = (
+                        "Segoe UI",
+                        9,
+                        "bold" if row_has_error else "normal",
+                    )
                 else:
                     bg_color = "#ffffff"
                     fg_color = "#334155"
@@ -833,42 +965,83 @@ class LogisticsAuditorApp:
                     font=font_style,
                     bg=bg_color,
                     fg=fg_color,
-                    width=col_width,
-                    padx=8,
-                    pady=6,
+                    padx=10,
+                    pady=8,
                     anchor="nw",
                     justify=tk.LEFT,
-                    wraplength=190,
+                    wraplength=initial_wraps[col_idx],
                 )
-                cell_lbl.grid(row=row_idx, column=col_idx, sticky="nsew", padx=1, pady=1)
+                cell_lbl.grid(
+                    row=row_idx, column=col_idx, sticky="nsew", padx=1, pady=1
+                )
+                col_cell_widgets[col_idx].append(cell_lbl)
+
                 if col_idx == 0:
                     row_field_widgets.append((cell_lbl, raw_field))
+
+        # Dynamic Canvas & Wraplength Scaling on Window Resize
+        last_width = [0]
+
+        def _on_canvas_configure(event):
+            cur_width = event.width
+            if abs(cur_width - last_width[0]) < 8:
+                return
+            last_width[0] = cur_width
+
+            min_table_width = 1260
+            target_width = max(cur_width - 4, min_table_width)
+            canvas.itemconfig(canvas_window, width=target_width)
+
+            # Recalculate wraplength for every cell in each column proportionally
+            for c_idx, weight in enumerate(col_weights):
+                col_pixel_width = int(weight * target_width / 100)
+                wrap_px = max(col_pixel_width - 22, 140)
+                for widget in col_cell_widgets[c_idx]:
+                    try:
+                        widget.configure(wraplength=wrap_px)
+                    except Exception:
+                        pass
+
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        canvas.bind("<Configure>", _on_canvas_configure)
 
         v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # 3. Discrepancy Summary Box (Docked at bottom)
+        # 1. Pack Summary Box FIRST to lock its space at the bottom
         bottom_frame = ttk.LabelFrame(popup, padding=10)
-        bottom_frame.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0, 10))
+        bottom_frame.pack(
+            side=tk.BOTTOM, fill=tk.X, expand=False, padx=12, pady=(0, 10)
+        )
 
         summary_text = tk.Text(
             bottom_frame,
             wrap="word",
-            height=7,
+            height=6,
             font=("Segoe UI", 10),
             bg="#f8f9fa",
             relief=tk.FLAT,
         )
-        summary_scroll = ttk.Scrollbar(bottom_frame, orient=tk.VERTICAL, command=summary_text.yview)
+        summary_scroll = ttk.Scrollbar(
+            bottom_frame, orient=tk.VERTICAL, command=summary_text.yview
+        )
         summary_text.configure(yscrollcommand=summary_scroll.set)
 
         summary_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        watermark = str(data.get("watermark_warning", "None"))
-        summary_en = data.get("discrepancy_summary_en") or data.get("discrepancy_summary", [])
-        summary_th = data.get("discrepancy_summary_th") or data.get("discrepancy_summary", [])
+        # 2. Pack Table Canvas to take all remaining vertical space
+        table_frame = ttk.Frame(popup, padding=(12, 4, 12, 6))
+        table_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(table_frame, bg="#f1f5f9", highlightthickness=0)
+        v_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=canvas.yview)
+        h_scroll = ttk.Scrollbar(
+            table_frame, orient=tk.HORIZONTAL, command=canvas.xview
+        )
+        grid_container = tk.Frame(canvas, bg="#cbd5e1")
 
         def refresh_popup_language():
             lang = "th" if popup_lang.get() else "en"
@@ -877,8 +1050,12 @@ class LogisticsAuditorApp:
                 self.use_thai.set(popup_lang.get())
                 self._update_ui_language()
 
-            popup.title(self._t("audit_popup_title", lang).format(name=pdf_name))
-            title_lbl.config(text=self._t("audit_popup_title", lang).format(name=pdf_name))
+            popup.title(
+                self._t("audit_popup_title", lang).format(name=pdf_name)
+            )
+            title_lbl.config(
+                text=self._t("audit_popup_title", lang).format(name=pdf_name)
+            )
             lang_chk.config(text=self._t("chk_thai", lang))
 
             headers = UI_TEXT[lang]["headers"]
@@ -916,7 +1093,6 @@ class LogisticsAuditorApp:
         lang_chk.config(command=refresh_popup_language)
         refresh_popup_language()
 
-        # Ensure viewport opens cleanly at top-left
         popup.update_idletasks()
         _update_scrollregion()
         canvas.yview_moveto(0)

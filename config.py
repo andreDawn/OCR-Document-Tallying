@@ -16,8 +16,8 @@ MODEL_CASCADE = [
     "gemini-3.5-flash-lite",
 ]
 
-JPEG_DPI = 300
-JPEG_QUALITY = 90
+JPEG_DPI = 180
+JPEG_QUALITY = 85
 MASTER_DB_CSV_URL = (
     "https://docs.google.com/spreadsheets/d/e/"
     "2PACX-1vRnVjErFgE05SHQ0vtnaiBJDbeR1d4MsHf7NKTm-tf_t1jbl2dC6h8EQ18MB0SIgA/"
@@ -45,8 +45,8 @@ Extraction & Scanning Rules:
 - Database: Extract Consignee address verbatim from Master Database excerpt. If missing, use "Unrecognized Consignee".
 
 2. Mandatory Fields to Extract (MUST extract all 18 fields in this exact order):
-1. Shipper / Exporter Name
-2. Shipper / Exporter Address
+1. Shipper Name
+2. Shipper Address
 3. Consignee Name
 4. Consignee Address
 5. Notify Party Name & Address
@@ -72,6 +72,17 @@ Extraction & Scanning Rules:
 - Form AK Box 3 (No Port of Loading): Box 3 contains Departure Date, Vessel Name, and Port of Discharge ONLY. In Row 17 ("Port of Loading"), output '-' for Form AK.
 - Voyage Suffix OCR Equivalence: Directional voyage suffixes 'S' (Southbound) and numeral '5' are EQUAL ('2607S' == '26075').
 - Description of Goods (CO Customs Syntax Allowance): Formal packaging wrappers (e.g. 'ONE THOUSAND... PACKAGES OF SHELF') match 'SHELF' on CI/PL/BL.
+- FIELD DEMARCATION & SPECIFICATIONS (CRITICAL):
+  * In Row 8 ("Description of Goods"): Extract the commodity description AND all line-item specifications/dimensions (e.g. '0.170 x 860 x 926').
+  * CROSS-CHECK SIZES & SPECS: You MUST rigorously compare dimension numbers across CI, PL, BL, and CO. 
+    - E.g. '0.170 x 860 x 926' on CI vs '0.170 x 850 x 926' on CO is a SEVERE 10mm discrepancy. You MUST flag both cells with ⚠️.
+  * STILL EXCLUDE: Carrier destination agents (YANG MING LINE / phone / fax) and shipper emails. Place HS codes into Row 13.
+- CONSIGNEE & NOTIFY PARTY (L/C TRADE ALLOWANCE):
+  * If the Bill of Lading is consigned 'TO THE ORDER OF [BANK NAME]' under a Letter of Credit:
+    - This is valid ONLY IF the actual buyer (e.g. 'TEERACHAI STEEL CENTER') is printed in the B/L Notify Party box.
+    - If the buyer is present in Notify Party, output both verbatim and record an explanatory note: "B/L is consigned to Order of Bank with buyer as Notify Party (Standard L/C Practice)."
+    - If the buyer is missing from Notify Party, flag Row 3 with ⚠️.
+  * In Row 5 ("Notify Party"): On CI, extract the actual Notify Party entity (e.g. 'BANK OF AYUDHYA PCL'), NOT the remark 'SAME AS ABOVE'.
 - Unit & Weight Equivalence: 1 MT = 1,000 KG / KGS ('348.951 MT' == '348,951.000 KGS'). 1 m³ = 1 CBM.
 - Commercial Billing Qty vs Physical Packages: Billing sets/pieces or MT on CI vs physical packaging units on PL/BL/CO is standard trade practice.
 - Shipping Marks: 'N/M', 'NO MARK', '-', or using B/L number are standard equivalents.
