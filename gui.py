@@ -833,9 +833,9 @@ class LogisticsAuditorApp:
         data = parse_audit_json(result_str)
         data = reconcile_discrepancies(data)
 
-        # Header bar
+        # 1. Top Header Bar
         top_bar = ttk.Frame(popup, padding=(14, 8, 14, 4))
-        top_bar.pack(fill=tk.X, expand=False)
+        top_bar.pack(side=tk.TOP, fill=tk.X, expand=False)
 
         title_lbl = ttk.Label(top_bar, font=("Segoe UI", 12, "bold"))
         title_lbl.pack(side=tk.LEFT)
@@ -843,24 +843,42 @@ class LogisticsAuditorApp:
         lang_chk = ttk.Checkbutton(top_bar, variable=popup_lang)
         lang_chk.pack(side=tk.RIGHT)
 
-        # Main Table Area
-        table_frame = ttk.Frame(popup, padding=(12, 4, 12, 6))
-        table_frame.pack(fill=tk.BOTH, expand=True)
+        # 2. Bottom Summary Frame (Packed FIRST at BOTTOM so it never clips off-screen)
+        bottom_frame = ttk.LabelFrame(popup, padding=10)
+        bottom_frame.pack(
+            side=tk.BOTTOM, fill=tk.X, expand=False, padx=12, pady=(4, 10)
+        )
+
+        summary_text = tk.Text(
+            bottom_frame,
+            wrap="word",
+            height=6,
+            font=("Segoe UI", 10),
+            bg="#f8f9fa",
+            relief=tk.FLAT,
+        )
+        summary_scroll = ttk.Scrollbar(
+            bottom_frame, orient=tk.VERTICAL, command=summary_text.yview
+        )
+        summary_text.configure(yscrollcommand=summary_scroll.set)
+
+        summary_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # 3. Main Table Canvas (Takes all remaining middle space)
+        table_frame = ttk.Frame(popup, padding=(12, 4, 12, 4))
+        table_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         canvas = tk.Canvas(table_frame, bg="#f1f5f9", highlightthickness=0)
-        v_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=canvas.yview)
+        v_scroll = ttk.Scrollbar(
+            table_frame, orient=tk.VERTICAL, command=canvas.yview
+        )
         h_scroll = ttk.Scrollbar(
             table_frame, orient=tk.HORIZONTAL, command=canvas.xview
         )
         grid_container = tk.Frame(canvas, bg="#cbd5e1")
 
-        # Proportional weights across 6 columns:
-        # Col 0: Data Field (18%)
-        # Col 1: CI (16%)
-        # Col 2: PL (16%)
-        # Col 3: BL (18%)
-        # Col 4: CO (18%)
-        # Col 5: Master DB (14%)
+        # Proportional weights across 6 columns
         col_weights = [18, 16, 16, 18, 18, 14]
         for col_idx, weight in enumerate(col_weights):
             grid_container.grid_columnconfigure(
@@ -874,29 +892,15 @@ class LogisticsAuditorApp:
             xscrollcommand=h_scroll.set, yscrollcommand=v_scroll.set
         )
 
-        def _update_scrollregion(event=None):
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        grid_container.bind("<Configure>", _update_scrollregion)
-
-        def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        canvas.bind(
-            "<Enter>", lambda _: canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        )
-        canvas.bind("<Leave>", lambda _: canvas.unbind_all("<MouseWheel>"))
-
         col_cell_widgets: dict[int, list[tk.Label]] = {i: [] for i in range(6)}
         header_label_widgets: list[tk.Label] = []
 
-        # Initial wrap calculation for baseline 1300px table width
         base_width = 1300
         initial_wraps = [
             max(int(w * base_width / 100) - 22, 140) for w in col_weights
         ]
 
-        # Build Headers (no fixed character width)
+        # Column Headers
         for col_idx in range(6):
             hdr = tk.Label(
                 grid_container,
@@ -916,7 +920,7 @@ class LogisticsAuditorApp:
         rows = data.get("audit_table", [])
         row_field_widgets: list[tuple[tk.Label, str]] = []
 
-        # Build Table Cells (sticky="nsew" allows labels to expand to column width)
+        # Table Rows
         for row_idx, item in enumerate(rows, start=1):
             raw_field = str(item.get("field", "-"))
             cells = [
@@ -979,7 +983,17 @@ class LogisticsAuditorApp:
                 if col_idx == 0:
                     row_field_widgets.append((cell_lbl, raw_field))
 
-        # Dynamic Canvas & Wraplength Scaling on Window Resize
+        # Pack Scrollbars and Canvas
+        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # 4. Reliable Scrolling & Geometry Handlers
+        def _update_scrollregion(event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        grid_container.bind("<Configure>", _update_scrollregion)
+
         last_width = [0]
 
         def _on_canvas_configure(event):
@@ -988,11 +1002,9 @@ class LogisticsAuditorApp:
                 return
             last_width[0] = cur_width
 
-            min_table_width = 1260
-            target_width = max(cur_width - 4, min_table_width)
+            target_width = max(cur_width - 4, 1260)
             canvas.itemconfig(canvas_window, width=target_width)
 
-            # Recalculate wraplength for every cell in each column proportionally
             for c_idx, weight in enumerate(col_weights):
                 col_pixel_width = int(weight * target_width / 100)
                 wrap_px = max(col_pixel_width - 22, 140)
@@ -1002,105 +1014,118 @@ class LogisticsAuditorApp:
                     except Exception:
                         pass
 
+            popup.update_idletasks()
             canvas.configure(scrollregion=canvas.bbox("all"))
 
         canvas.bind("<Configure>", _on_canvas_configure)
 
-        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # 5. Global Mouse Wheel & Keyboard Navigation (Binds to whole window)
+        def _on_mousewheel(event):
+            try:
+                # Do not intercept if scrolling inside the summary text box
+                w = popup.winfo_containing(event.x_root, event.y_root)
+                if w and (w == summary_text or "text" in str(w).lower()):
+                    return
 
-        # 1. Pack Summary Box FIRST to lock its space at the bottom
-        bottom_frame = ttk.LabelFrame(popup, padding=10)
-        bottom_frame.pack(
-            side=tk.BOTTOM, fill=tk.X, expand=False, padx=12, pady=(0, 10)
-        )
+                if event.delta:
+                    # Windows wheel: delta is +/- 120
+                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
 
-        summary_text = tk.Text(
-            bottom_frame,
-            wrap="word",
-            height=6,
-            font=("Segoe UI", 10),
-            bg="#f8f9fa",
-            relief=tk.FLAT,
-        )
-        summary_scroll = ttk.Scrollbar(
-            bottom_frame, orient=tk.VERTICAL, command=summary_text.yview
-        )
-        summary_text.configure(yscrollcommand=summary_scroll.set)
+        def _on_shift_mousewheel(event):
+            try:
+                if event.delta:
+                    canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
 
-        summary_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        popup.bind_all("<MouseWheel>", _on_mousewheel)
+        popup.bind_all("<Shift-MouseWheel>", _on_shift_mousewheel)
 
-        # 2. Pack Table Canvas to take all remaining vertical space
-        table_frame = ttk.Frame(popup, padding=(12, 4, 12, 6))
-        table_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        # Trackpad / Linux scrolling support
+        popup.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-2, "units"))
+        popup.bind_all("<Button-5>", lambda e: canvas.yview_scroll(2, "units"))
 
-        canvas = tk.Canvas(table_frame, bg="#f1f5f9", highlightthickness=0)
-        v_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=canvas.yview)
-        h_scroll = ttk.Scrollbar(
-            table_frame, orient=tk.HORIZONTAL, command=canvas.xview
-        )
-        grid_container = tk.Frame(canvas, bg="#cbd5e1")
+        # Keyboard arrows & page navigation
+        popup.bind("<Up>", lambda e: canvas.yview_scroll(-2, "units"))
+        popup.bind("<Down>", lambda e: canvas.yview_scroll(2, "units"))
+        popup.bind("<Prior>", lambda e: canvas.yview_scroll(-6, "units"))
+        popup.bind("<Next>", lambda e: canvas.yview_scroll(6, "units"))
 
+        # Clean up global binds when popup closes
+        def _on_popup_destroy(event):
+            if event.widget == popup:
+                try:
+                    popup.unbind_all("<MouseWheel>")
+                    popup.unbind_all("<Shift-MouseWheel>")
+                    popup.unbind_all("<Button-4>")
+                    popup.unbind_all("<Button-5>")
+                except Exception:
+                    pass
+
+        popup.bind("<Destroy>", _on_popup_destroy)
+
+        # 6. Bilingual Language Refresh Handler
         def refresh_popup_language():
-          lang = "th" if popup_lang.get() else "en"
+            lang = "th" if popup_lang.get() else "en"
 
-          if self.use_thai.get() != popup_lang.get():
-            self.use_thai.set(popup_lang.get())
-            self._update_ui_language()
+            if self.use_thai.get() != popup_lang.get():
+                self.use_thai.set(popup_lang.get())
+                self._update_ui_language()
 
-          popup.title(self._t("audit_popup_title", lang).format(name=pdf_name))
-          title_lbl.config(
-              text=self._t("audit_popup_title", lang).format(name=pdf_name)
-          )
-          lang_chk.config(text=self._t("chk_thai", lang))
+            popup.title(
+                self._t("audit_popup_title", lang).format(name=pdf_name)
+            )
+            title_lbl.config(
+                text=self._t("audit_popup_title", lang).format(name=pdf_name)
+            )
+            lang_chk.config(text=self._t("chk_thai", lang))
 
-          headers = UI_TEXT[lang]["headers"]
-          for idx, h_widget in enumerate(header_label_widgets):
-            h_widget.config(text=headers[idx])
+            headers = UI_TEXT[lang]["headers"]
+            for idx, h_widget in enumerate(header_label_widgets):
+                h_widget.config(text=headers[idx])
 
-          for lbl_widget, raw_f in row_field_widgets:
-            _, en_lbl, th_lbl = get_field_info(raw_f)
-            lbl_widget.config(text=th_lbl if lang == "th" else en_lbl)
+            for lbl_widget, raw_f in row_field_widgets:
+                _, en_lbl, th_lbl = get_field_info(raw_f)
+                lbl_widget.config(text=th_lbl if lang == "th" else en_lbl)
 
-          bottom_frame.config(text=self._t("summary_title", lang))
+            bottom_frame.config(text=self._t("summary_title", lang))
 
-          # Read directly from parsed data without nonlocal scoping
-          watermark = str(data.get("watermark_warning", "None"))
-          summary_en = data.get("discrepancy_summary_en") or data.get(
-              "discrepancy_summary", []
-          )
-          summary_th = data.get("discrepancy_summary_th") or data.get(
-              "discrepancy_summary", []
-          )
+            watermark = str(data.get("watermark_warning", "None"))
+            summary_en = data.get("discrepancy_summary_en") or data.get(
+                "discrepancy_summary", []
+            )
+            summary_th = data.get("discrepancy_summary_th") or data.get(
+                "discrepancy_summary", []
+            )
 
-          active_en = summary_en if summary_en else summary_th
-          active_th = summary_th if summary_th else summary_en
-          active_summary = active_th if lang == "th" else active_en
+            active_en = summary_en if summary_en else summary_th
+            active_th = summary_th if summary_th else summary_en
+            active_summary = active_th if lang == "th" else active_en
 
-          summary_content = ""
-          if watermark and watermark.lower() not in ("none", "null", ""):
-            wm_label = self._t("watermark_label", lang)
-            summary_content += f"{wm_label} {watermark}\n\n"
+            summary_content = ""
+            if watermark and watermark.lower() not in ("none", "null", ""):
+                wm_label = self._t("watermark_label", lang)
+                summary_content += f"{wm_label} {watermark}\n\n"
 
-          if isinstance(active_summary, list) and active_summary:
-            summary_content += "\n".join(f"• {s}" for s in active_summary)
-          elif isinstance(active_summary, str) and active_summary:
-            summary_content += active_summary
-          else:
-            summary_content += self._t("no_discrepancy", lang)
+            if isinstance(active_summary, list) and active_summary:
+                summary_content += "\n".join(f"• {s}" for s in active_summary)
+            elif isinstance(active_summary, str) and active_summary:
+                summary_content += active_summary
+            else:
+                summary_content += self._t("no_discrepancy", lang)
 
-          summary_text.config(state="normal")
-          summary_text.delete("1.0", tk.END)
-          summary_text.insert("1.0", summary_content)
-          summary_text.config(state="disabled")
+            summary_text.config(state="normal")
+            summary_text.delete("1.0", tk.END)
+            summary_text.insert("1.0", summary_content)
+            summary_text.config(state="disabled")
 
         lang_chk.config(command=refresh_popup_language)
         refresh_popup_language()
 
         popup.update_idletasks()
-        _update_scrollregion()
+        canvas.configure(scrollregion=canvas.bbox("all"))
         canvas.yview_moveto(0)
         canvas.xview_moveto(0)
 
