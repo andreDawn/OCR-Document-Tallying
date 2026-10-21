@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import time
+import json
 from pathlib import Path
 from typing import Callable
 
@@ -35,11 +36,13 @@ def save_api_key(api_key: str) -> None:
 
 def validate_api_key(api_key: str) -> bool:
     try:
-        # Configure with the test key
-        genai.configure(api_key=api_key)
+        # Create a temporary client with the test key
+        test_client = genai.Client(api_key=api_key)
         # Make a microscopic test call to verify authentication
-        model = genai.GenerativeModel("gemini-1.5-flash-8b")
-        model.generate_content("test")
+        test_client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents="test"
+        )
         return True
     except Exception:
         return False
@@ -70,7 +73,7 @@ def extract_from_jpegs(
     if not jpeg_paths:
         raise ValueError("No JPEG images were provided for extraction.")
 
-    api_key = get_gemini_api_key()
+    api_key = get_saved_api_key()
     if not api_key:
         raise RuntimeError("No Gemini API key found. Please configure your key in Settings.")
 

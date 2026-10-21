@@ -497,6 +497,10 @@ class LogisticsAuditorApp:
             self._enable_drag_and_drop()
 
         self._check_updates_background()
+        
+        from gemini_client import get_saved_api_key
+        if not get_saved_api_key():
+            self.root.after(500, self._show_api_settings)
 
     def _t(self, key: str, lang: str | None = None) -> str:
         selected_lang = lang or ("th" if self.use_thai.get() else "en")
@@ -685,10 +689,22 @@ class LogisticsAuditorApp:
                     progress_callback=on_progress,
                 )
             except Exception as exc:
-                err_text = str(exc)
-                self.root.after(0, lambda msg=err_text: messagebox.showerror("Update Error", msg))
-                self._busy = False
-                self.root.after(0, lambda: self.update_btn.config(state="normal"))
+                err_msg = str(exc)
+                traceback.print_exc()
+
+                def fail() -> None:
+                    self._busy = False
+                    self.progress.stop()
+                    
+                    # --- NEW: Catch Auth Errors and pop the modal ---
+                    if "NO_API_KEY" in err_msg or "401" in err_msg or "403" in err_msg:
+                        self.status.set("Authentication failed. Please check API Key.")
+                        self._show_api_settings()
+                    else:
+                        self.status.set(f"Error: {err_msg}")
+                        messagebox.showerror("Error", err_msg)
+
+                self.root.after(0, fail)
 
         threading.Thread(target=_worker, daemon=True).start()
 
