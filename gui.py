@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, filedialog, messagebox, ttk
 import tkinter as tk
+from tkinter import messagebox
 
 from gemini_client import extract_from_jpegs, save_markdown
 from master_db import load_master_database_excerpt
@@ -435,45 +436,65 @@ def run_deterministic_audit(rows: list[dict]) -> tuple[list[str], list[str]]:
 
 def reconcile_discrepancies(data: dict) -> dict:
     rows = data.get("audit_table", [])
-
-    # 1. Clean any raw ⚠️ prefixes so we start from a clean baseline
+    
+    # 1. Clean old tags
     for row in rows:
         for col in ["ci", "pl", "bl", "co", "master_db"]:
             val = str(row.get(col, "")).strip()
             if val.startswith("⚠️"):
                 row[col] = re.sub(r"^⚠️\s*", "", val)
 
-    # 2. Reconcile ONLY using the English summary to prevent Thai substring collisions
     raw_en = data.get("discrepancy_summary_en") or data.get("discrepancy_summary", [])
     summaries = raw_en if isinstance(raw_en, list) else ([raw_en] if raw_en else [])
+    summary_text = " ".join(summaries).upper()
 
-    if summaries and rows:
-        for summary in summaries:
-            target_docs = [col for col, pat in DOC_PATTERNS.items() if re.search(pat, summary, re.I)]
-            cols = target_docs if target_docs else ["ci", "pl", "bl", "co", "master_db"]
-
-            for row in rows:
-                fname = str(row.get("field", ""))
-                key, _, _ = get_field_info(fname)
-                pat = SUMMARY_PATTERNS.get(key)
-                if pat and re.search(pat, summary, re.I):
-                    for col in cols:
-                        val = str(row.get(col, "")).strip()
-                        if val and val != "-" and not val.startswith("⚠️"):
-                            row[col] = f"⚠️ {val}"
-
-    # 3. Deterministic cross-checks on weights, volumes, and shipper names
-    auto_en, auto_th = run_deterministic_audit(rows)
-
-    s_en = data.setdefault("discrepancy_summary_en", [])
-    s_th = data.setdefault("discrepancy_summary_th", [])
-
-    for e in auto_en:
-        if e not in s_en:
-            s_en.append(e)
-    for t in auto_th:
-        if t not in s_th:
-            s_th.append(t)
+    for row in rows:
+        fname = str(row.get("field", ""))
+        key, _, _ = get_field_info(fname)
+        
+        # --- 1. STRICT MASTER DB CHECK (Python handles Consignee truth) ---
+        master_val = str(row.get("master_db", "")).strip()
+        if master_val and master_val != "-":
+            for col in ["ci", "pl", "bl", "co"]:
+                val = str(row.get(col, "")).strip()
+                if val and val != "-":
+                    # Flag if it doesn't perfectly match the Master DB
+                    if val.upper() != master_val.upper():
+                        row[col] = f"⚠️ {val}"
+            continue  # Skip AI checks for this row since Master DB is the absolute rule
+            
+        # --- 2. AI-DRIVEN CHECK (AI handles weights, volumes, pkgs) ---
+        pat = SUMMARY_PATTERNS.get(key)
+        
+        # Only apply red flags if the AI explicitly noted a discrepancy in the summary
+        if pat and re.search(pat, summary_text, re.I):
+            ci_val = str(row.get("ci", "")).strip()
+            baseline = ci_val if ci_val and ci_val != "-" else "-"
+            
+            if baseline == "-":
+                for fb in ["pl", "bl", "co"]:
+                    fb_val = str(row.get(fb, "")).strip()
+                    if fb_val and fb_val != "-":
+                        baseline = fb_val
+                        break
+                        
+            base_clean = baseline.replace("(Invoice)", "").replace("(Native)", "").strip()
+            
+            for col in ["ci", "pl", "bl", "co"]:
+                val = str(row.get(col, "")).strip()
+                if not val or val == "-" or val.startswith("⚠️"):
+                    continue
+                    
+                val_clean = val.replace("(Invoice)", "").replace("(Native)", "").strip()
+                if val_clean == base_clean or base_clean in val_clean:
+                    continue
+                    
+                # Edge case: Missing invoice data on BL/CO
+                if "Document" in fname or "Date" in fname:
+                    if "- (Invoice)" in val or "NOT STATED" in val.upper():
+                        continue
+                        
+                row[col] = f"⚠️ {val}"
 
     return data
 
@@ -522,6 +543,7 @@ class LogisticsAuditorApp:
         self.update_btn = ttk.Button(nav_frame, command=self._start_update_flow)
 
         self.api_btn = ttk.Button(nav_frame, text="🔑 API Settings", command=self._show_api_settings)
+        self.api_btn.pack(side=tk.LEFT, padx=3)
 
         self.recent_btn = ttk.Button(nav_frame, command=self._show_recent_audits)
         self.recent_btn.pack(side=tk.LEFT, padx=3)
@@ -557,7 +579,7 @@ class LogisticsAuditorApp:
         )
         self.chk_thai.pack(side=tk.LEFT)
 
-        # NEW: Declaration Form Checkbox
+        # Declaration Form Checkbox
         self.has_declaration = BooleanVar(value=False)
         self.decl_chk = ttk.Checkbutton(
             options_row,
@@ -581,7 +603,7 @@ class LogisticsAuditorApp:
         )
         self.footer_label.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
 
-        # NEW: Progress Bar
+        # Progress Bar
         self.progress = ttk.Progressbar(frame, mode="indeterminate")
         self.progress.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 10))
 
@@ -619,12 +641,13 @@ class LogisticsAuditorApp:
 
     def _show_api_settings(self) -> None:
         from gemini_client import get_saved_api_key, save_api_key, validate_api_key
+        import threading
         
         modal = tk.Toplevel(self.root)
         modal.title("API Key Settings")
-        modal.geometry("450x200")
+        modal.geometry("450x230")  # Increased height slightly to prevent clipping
         modal.resizable(False, False)
-        modal.grab_set() # Forces focus on this window
+        modal.grab_set()
 
         ttk.Label(modal, text="Google Gemini API Key:", font=("Segoe UI", 10, "bold")).pack(pady=(20, 5))
         
@@ -632,23 +655,32 @@ class LogisticsAuditorApp:
         entry = ttk.Entry(modal, textvariable=key_var, show="*", width=50)
         entry.pack(pady=5)
 
+        # The status label that was missing
         status_lbl = ttk.Label(modal, text="", font=("Segoe UI", 9))
         status_lbl.pack(pady=5)
 
         def verify_and_save():
             btn.config(state="disabled")
             status_lbl.config(text="Validating key...", foreground="blue")
-            modal.update()
             
-            test_key = key_var.get().strip()
-            if validate_api_key(test_key):
-                save_api_key(test_key)
-                status_lbl.config(text="Authentication Successful! Key saved.", foreground="green")
-                modal.after(1500, modal.destroy)
-            else:
-                status_lbl.config(text="Invalid or expired API Key.", foreground="red")
-                btn.config(state="normal")
+            def _check_key():
+                test_key = key_var.get().strip()
+                is_valid = validate_api_key(test_key)
+                
+                def _update_ui():
+                    if is_valid:
+                        save_api_key(test_key)
+                        status_lbl.config(text="Authentication Successful! Key saved.", foreground="green")
+                        modal.after(1500, modal.destroy)
+                    else:
+                        status_lbl.config(text="Invalid or expired API Key.", foreground="red")
+                        btn.config(state="normal")
+                
+                modal.after(0, _update_ui)
+                
+            threading.Thread(target=_check_key, daemon=True).start()
 
+        # The button that was missing
         btn = ttk.Button(modal, text="Verify & Save", command=verify_and_save)
         btn.pack(pady=10)
 

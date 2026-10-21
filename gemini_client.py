@@ -36,15 +36,26 @@ def save_api_key(api_key: str) -> None:
 
 def validate_api_key(api_key: str) -> bool:
     try:
-        # Create a temporary client with the test key
-        test_client = genai.Client(api_key=api_key)
-        # Make a microscopic test call to verify authentication
-        test_client.models.generate_content(
-            model="gemini-1.5-flash",
-            contents="test"
+        # Add a strict 10-second timeout so it fails fast on bad Wi-Fi
+        test_client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=10000) 
         )
+        
+        # Make a lightweight metadata request instead of a heavy text generation
+        # If the key is invalid or revoked, this immediately throws a 401/403.
+        model_pager = test_client.models.list()
+        
+        # Fetch just the very first item to confirm the connection is active
+        next(model_pager) 
+        
         return True
-    except Exception:
+        
+    except Exception as e:
+        print("\n" + "="*50)
+        print("🚨 API VALIDATION FAILED. ACTUAL ERROR:")
+        print(str(e))
+        print("="*50 + "\n")
         return False
 
 def _get_live_fallback_models(client: genai.Client) -> list[str]:
