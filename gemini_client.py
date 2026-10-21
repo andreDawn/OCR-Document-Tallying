@@ -18,6 +18,31 @@ from config import (
     get_gemini_api_key,
 )
 
+CONFIG_FILE = Path.home() / ".dawn_auditor_config.json"
+
+def get_saved_api_key() -> str:
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                return json.load(f).get("api_key", "")
+        except Exception:
+            return ""
+    return ""
+
+def save_api_key(api_key: str) -> None:
+    with open(CONFIG_FILE, "w") as f:
+        json.dump({"api_key": api_key}, f)
+
+def validate_api_key(api_key: str) -> bool:
+    try:
+        # Configure with the test key
+        genai.configure(api_key=api_key)
+        # Make a microscopic test call to verify authentication
+        model = genai.GenerativeModel("gemini-1.5-flash-8b")
+        model.generate_content("test")
+        return True
+    except Exception:
+        return False
 
 def _get_live_fallback_models(client: genai.Client) -> list[str]:
     """Query Google API for any currently active generateContent models as an emergency fallback."""

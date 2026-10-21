@@ -517,6 +517,8 @@ class LogisticsAuditorApp:
 
         self.update_btn = ttk.Button(nav_frame, command=self._start_update_flow)
 
+        self.api_btn = ttk.Button(nav_frame, text="🔑 API Settings", command=self._show_api_settings)
+
         self.recent_btn = ttk.Button(nav_frame, command=self._show_recent_audits)
         self.recent_btn.pack(side=tk.LEFT, padx=3)
 
@@ -610,6 +612,41 @@ class LogisticsAuditorApp:
                 self.root.after(0, self._reveal_update_button)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_api_settings(self) -> None:
+        from gemini_client import get_saved_api_key, save_api_key, validate_api_key
+        
+        modal = tk.Toplevel(self.root)
+        modal.title("API Key Settings")
+        modal.geometry("450x200")
+        modal.resizable(False, False)
+        modal.grab_set() # Forces focus on this window
+
+        ttk.Label(modal, text="Google Gemini API Key:", font=("Segoe UI", 10, "bold")).pack(pady=(20, 5))
+        
+        key_var = tk.StringVar(value=get_saved_api_key())
+        entry = ttk.Entry(modal, textvariable=key_var, show="*", width=50)
+        entry.pack(pady=5)
+
+        status_lbl = ttk.Label(modal, text="", font=("Segoe UI", 9))
+        status_lbl.pack(pady=5)
+
+        def verify_and_save():
+            btn.config(state="disabled")
+            status_lbl.config(text="Validating key...", foreground="blue")
+            modal.update()
+            
+            test_key = key_var.get().strip()
+            if validate_api_key(test_key):
+                save_api_key(test_key)
+                status_lbl.config(text="Authentication Successful! Key saved.", foreground="green")
+                modal.after(1500, modal.destroy)
+            else:
+                status_lbl.config(text="Invalid or expired API Key.", foreground="red")
+                btn.config(state="normal")
+
+        btn = ttk.Button(modal, text="Verify & Save", command=verify_and_save)
+        btn.pack(pady=10)
 
     def _reveal_update_button(self) -> None:
         lang = "th" if self.use_thai.get() else "en"
