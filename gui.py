@@ -73,8 +73,8 @@ SUMMARY_PATTERNS = {
     "consignee_address": r"consignee.*addr|ที่อยู่.*ผู้รับ",
     "consignee_name":    r"consignee(?!.*addr)|ผู้รับ(?!.*(ที่อยู่|แจ้ง))",
     "notify":            r"notify|ผู้รับแจ้ง",
-    "document":          r"$^",  # Independent serials, never flag
-    "date":              r"$^",  # Independent dates, never flag
+    "document":          r"doc|reference|invoice|เลขที่|อ้างอิง",
+    "date":              r"\bdate\b|วันที่",
     "description":       r"desc|goods|สินค้า",
     "quantity":          r"quant|pack|จำนวน|หีบห่อ|ชิ้น|กล่อง|พาเลท",
     "net_weight":        r"net\s*weight|\bnw\b|น้ำหนักสุทธิ",
@@ -551,6 +551,15 @@ class LogisticsAuditorApp:
         )
         self.chk_thai.pack(side=tk.LEFT)
 
+        # NEW: Declaration Form Checkbox
+        self.has_declaration = BooleanVar(value=False)
+        self.decl_chk = ttk.Checkbutton(
+            options_row,
+            text="Includes Declaration Form",
+            variable=self.has_declaration,
+        )
+        self.decl_chk.pack(side=tk.LEFT, padx=(20, 0))
+
         ttk.Label(
             frame,
             textvariable=self.status,
@@ -565,6 +574,10 @@ class LogisticsAuditorApp:
             anchor=tk.CENTER,
         )
         self.footer_label.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
+
+        # NEW: Progress Bar
+        self.progress = ttk.Progressbar(frame, mode="indeterminate")
+        self.progress.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 10))
 
     def _show_about_dialog(self) -> None:
         lang = "th" if self.use_thai.get() else "en"
@@ -669,7 +682,15 @@ class LogisticsAuditorApp:
             filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
         )
         if filenames:
-            self._start_jobs([Path(name) for name in filenames])
+            # STRICT FILTER: Only take PDFs and sort them so the order is always consistent
+            pdfs = [Path(name) for name in filenames if name.lower().endswith(".pdf")]
+            pdfs.sort()
+            
+            if not pdfs:
+                messagebox.showwarning(self._t("no_pdf_title", lang), self._t("no_pdf_msg", lang))
+                return
+                
+            self._start_jobs(pdfs)
 
     def _generate_report_name(self, result_str: str) -> str:
         shipper_name = ""
@@ -774,6 +795,10 @@ class LogisticsAuditorApp:
         errors: list[str] = []
         saved: list[Path] = []
         lang = "th" if self.use_thai.get() else "en"
+        
+        # Start the loading bar
+        self.root.after(0, lambda: self.progress.start(15))
+        
         try:
             self._set_status(self._t("status_db", lang))
             master_excerpt = load_master_database_excerpt()
@@ -785,12 +810,16 @@ class LogisticsAuditorApp:
 
             self._set_status(self._t("status_upload", lang).format(count=len(all_jpegs)))
 
+            # Check if user flagged Declaration Form
+            is_decl = self.has_declaration.get()
+
             result_str = extract_from_jpegs(
                 pdf_path=pdf_paths[0],
                 jpeg_paths=all_jpegs,
                 master_db_excerpt=master_excerpt,
                 use_thai=False,
                 status_callback=self._set_status,
+                has_declaration=is_decl # Ensure you update extract_from_jpegs signature in main.py to accept this!
             )
 
             report_name = self._generate_report_name(result_str)
@@ -805,6 +834,7 @@ class LogisticsAuditorApp:
 
             def finish() -> None:
                 self._busy = False
+                self.progress.stop() # Stop loading bar
                 if saved and not errors:
                     self.status.set(self._t("status_success", lang).format(name=report_name))
                 elif errors:
@@ -819,6 +849,7 @@ class LogisticsAuditorApp:
 
             def fail() -> None:
                 self._busy = False
+                self.progress.stop() # Stop loading bar on error
                 self.status.set(f"Error: {err_msg}")
                 messagebox.showerror("Error", err_msg)
 
@@ -831,7 +862,41 @@ class LogisticsAuditorApp:
 
         popup_lang = BooleanVar(value=self.use_thai.get())
         data = parse_audit_json(result_str)
+
+        if not data or not data.get("audit_table"):
+            popup.destroy()
+            messagebox.showerror(
+                "JSON Parsing Error", 
+                "Gemini generated an invalid or badly formatted response.\n\nCheck your terminal window to see the raw output and identify the syntax error."
+            )
+            return
+
         data = reconcile_discrepancies(data)
+        rows = data.get("audit_table", [])
+
+        # Define localized, standout tags
+        is_thai = self.use_thai.get()
+        tag_inv = "【 ใบแจ้งหนี้ 】" if is_thai else "【 INVOICE 】"
+        tag_nat = "【 ต้นฉบับ 】" if is_thai else "【 NATIVE 】"
+        
+        # --- Inside your existing table row loop ---
+        for row_idx, item in enumerate(rows):
+            raw_field = str(item.get("field", "-"))
+            cells = [
+                raw_field,
+                str(item.get("ci", "-")),
+                str(item.get("pl", "-")),
+                str(item.get("bl", "-")),
+                str(item.get("co", "-")),
+                str(item.get("master_db", "-")),
+            ]
+
+            # NEW: Replace the AI's standard English tags with our localized UI tags
+            for i in range(1, 6):
+                if "(Invoice)" in cells[i]:
+                    cells[i] = cells[i].replace("(Invoice)", tag_inv)
+                if "(Native)" in cells[i]:
+                    cells[i] = cells[i].replace("(Native)", tag_nat)
 
         # 1. Top Header Bar
         top_bar = ttk.Frame(popup, padding=(14, 8, 14, 4))
@@ -866,44 +931,57 @@ class LogisticsAuditorApp:
         summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # 3. Main Table Canvas (Takes all remaining middle space)
+        # 3. Main Table Canvas (Takes all remaining middle space)
         table_frame = ttk.Frame(popup, padding=(12, 4, 12, 4))
         table_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        canvas = tk.Canvas(table_frame, bg="#f1f5f9", highlightthickness=0)
-        v_scroll = ttk.Scrollbar(
-            table_frame, orient=tk.VERTICAL, command=canvas.yview
-        )
-        h_scroll = ttk.Scrollbar(
-            table_frame, orient=tk.HORIZONTAL, command=canvas.xview
-        )
+        v_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL)
+        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        h_scroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL)
+        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+
+        inner_frame = tk.Frame(table_frame)
+        inner_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # STICKY HEADER CANVAS
+        header_canvas = tk.Canvas(inner_frame, bg="#cbd5e1", highlightthickness=0, height=45)
+        header_canvas.pack(side=tk.TOP, fill=tk.X)
+        header_container = tk.Frame(header_canvas, bg="#cbd5e1")
+        header_window = header_canvas.create_window((0, 0), window=header_container, anchor="nw")
+
+        # MAIN ROWS CANVAS
+        canvas = tk.Canvas(inner_frame, bg="#f1f5f9", highlightthickness=0)
+        canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         grid_container = tk.Frame(canvas, bg="#cbd5e1")
+        canvas_window = canvas.create_window((0, 0), window=grid_container, anchor="nw")
+
+        # Link scrollbars
+        def _on_h_scroll(*args):
+            canvas.xview(*args)
+            header_canvas.xview(*args)
+
+        h_scroll.config(command=_on_h_scroll)
+        v_scroll.config(command=canvas.yview)
+        canvas.config(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+        header_canvas.config(xscrollcommand=h_scroll.set)
 
         # Proportional weights across 6 columns
         col_weights = [18, 16, 16, 18, 18, 14]
         for col_idx, weight in enumerate(col_weights):
-            grid_container.grid_columnconfigure(
-                col_idx, weight=weight, minsize=170
-            )
-
-        canvas_window = canvas.create_window(
-            (0, 0), window=grid_container, anchor="nw"
-        )
-        canvas.configure(
-            xscrollcommand=h_scroll.set, yscrollcommand=v_scroll.set
-        )
+            header_container.grid_columnconfigure(col_idx, weight=weight, minsize=170)
+            grid_container.grid_columnconfigure(col_idx, weight=weight, minsize=170)
 
         col_cell_widgets: dict[int, list[tk.Label]] = {i: [] for i in range(6)}
         header_label_widgets: list[tk.Label] = []
 
         base_width = 1300
-        initial_wraps = [
-            max(int(w * base_width / 100) - 22, 140) for w in col_weights
-        ]
+        initial_wraps = [max(int(w * base_width / 100) - 22, 140) for w in col_weights]
 
-        # Column Headers
+        # Column Headers (Now packed into header_container)
         for col_idx in range(6):
             hdr = tk.Label(
-                grid_container,
+                header_container,
                 font=("Segoe UI", 9, "bold"),
                 bg="#e2e8f0",
                 fg="#1e293b",
@@ -920,8 +998,8 @@ class LogisticsAuditorApp:
         rows = data.get("audit_table", [])
         row_field_widgets: list[tuple[tk.Label, str]] = []
 
-        # Table Rows
-        for row_idx, item in enumerate(rows, start=1):
+        # Table Rows (Packed into grid_container, starting at row_idx=0 since headers moved)
+        for row_idx, item in enumerate(rows):
             raw_field = str(item.get("field", "-"))
             cells = [
                 raw_field,
@@ -932,36 +1010,26 @@ class LogisticsAuditorApp:
                 str(item.get("master_db", "-")),
             ]
 
-            row_has_error = any(
-                "⚠️" in c or "[Printed as: BLANK/MISSING]" in c for c in cells[1:]
-            )
+            row_has_error = any("⚠️" in c or "[Printed as: BLANK/MISSING]" in c for c in cells[1:])
 
             for col_idx, cell_val in enumerate(cells):
-                is_flagged = (
-                    (
-                        "⚠️" in cell_val
-                        or "[Printed as: BLANK/MISSING]" in cell_val
-                    )
-                    if col_idx > 0
-                    else False
-                )
+                is_severe = (("⚠️" in cell_val or "[Printed as: BLANK/MISSING]" in cell_val) if col_idx > 0 else False)
+                is_manual_review = ("🔍" in cell_val if col_idx > 0 else False)
 
-                if is_flagged:
-                    bg_color = "#fde8e8"
-                    fg_color = "#991b1b"
-                    font_style = ("Segoe UI", 9, "bold")
+                if is_severe:
+                    # Red for severe discrepancies
+                    bg_color, fg_color, font_style = "#fde8e8", "#991b1b", ("Segoe UI", 9, "bold")
+                elif is_manual_review:
+                    # Yellow/Orange for manual human review
+                    bg_color, fg_color, font_style = "#fef08a", "#854d0e", ("Segoe UI", 9, "bold")
                 elif col_idx == 0:
+                    # Header column formatting
                     bg_color = "#f8fafc"
-                    fg_color = "#991b1b" if row_has_error else "#0f172a"
-                    font_style = (
-                        "Segoe UI",
-                        9,
-                        "bold" if row_has_error else "normal",
-                    )
+                    fg_color = "#991b1b" if (row_has_error or "🔍" in str(cells)) else "#0f172a"
+                    font_style = ("Segoe UI", 9, "bold" if (row_has_error or "🔍" in str(cells)) else "normal")
                 else:
-                    bg_color = "#ffffff"
-                    fg_color = "#334155"
-                    font_style = ("Segoe UI", 9)
+                    # Green for perfect matches
+                    bg_color, fg_color, font_style = "#dcfce7", "#166534", ("Segoe UI", 9)
 
                 cell_lbl = tk.Label(
                     grid_container,
@@ -975,24 +1043,19 @@ class LogisticsAuditorApp:
                     justify=tk.LEFT,
                     wraplength=initial_wraps[col_idx],
                 )
-                cell_lbl.grid(
-                    row=row_idx, column=col_idx, sticky="nsew", padx=1, pady=1
-                )
+                cell_lbl.grid(row=row_idx, column=col_idx, sticky="nsew", padx=1, pady=1)
                 col_cell_widgets[col_idx].append(cell_lbl)
 
                 if col_idx == 0:
                     row_field_widgets.append((cell_lbl, raw_field))
 
-        # Pack Scrollbars and Canvas
-        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
         # 4. Reliable Scrolling & Geometry Handlers
         def _update_scrollregion(event=None):
             canvas.configure(scrollregion=canvas.bbox("all"))
+            header_canvas.configure(scrollregion=header_canvas.bbox("all"))
 
         grid_container.bind("<Configure>", _update_scrollregion)
+        header_container.bind("<Configure>", _update_scrollregion)
 
         last_width = [0]
 
@@ -1004,6 +1067,7 @@ class LogisticsAuditorApp:
 
             target_width = max(cur_width - 4, 1260)
             canvas.itemconfig(canvas_window, width=target_width)
+            header_canvas.itemconfig(header_window, width=target_width)
 
             for c_idx, weight in enumerate(col_weights):
                 col_pixel_width = int(weight * target_width / 100)
@@ -1015,20 +1079,17 @@ class LogisticsAuditorApp:
                         pass
 
             popup.update_idletasks()
-            canvas.configure(scrollregion=canvas.bbox("all"))
+            _update_scrollregion()
 
         canvas.bind("<Configure>", _on_canvas_configure)
 
-        # 5. Global Mouse Wheel & Keyboard Navigation (Binds to whole window)
+        # 5. Global Mouse Wheel & Keyboard Navigation
         def _on_mousewheel(event):
             try:
-                # Do not intercept if scrolling inside the summary text box
                 w = popup.winfo_containing(event.x_root, event.y_root)
                 if w and (w == summary_text or "text" in str(w).lower()):
                     return
-
                 if event.delta:
-                    # Windows wheel: delta is +/- 120
                     canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
             except Exception:
                 pass
@@ -1036,24 +1097,21 @@ class LogisticsAuditorApp:
         def _on_shift_mousewheel(event):
             try:
                 if event.delta:
-                    canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+                    steps = int(-1 * (event.delta / 120))
+                    canvas.xview_scroll(steps, "units")
+                    header_canvas.xview_scroll(steps, "units")
             except Exception:
                 pass
 
         popup.bind_all("<MouseWheel>", _on_mousewheel)
         popup.bind_all("<Shift-MouseWheel>", _on_shift_mousewheel)
-
-        # Trackpad / Linux scrolling support
         popup.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-2, "units"))
         popup.bind_all("<Button-5>", lambda e: canvas.yview_scroll(2, "units"))
-
-        # Keyboard arrows & page navigation
         popup.bind("<Up>", lambda e: canvas.yview_scroll(-2, "units"))
         popup.bind("<Down>", lambda e: canvas.yview_scroll(2, "units"))
         popup.bind("<Prior>", lambda e: canvas.yview_scroll(-6, "units"))
         popup.bind("<Next>", lambda e: canvas.yview_scroll(6, "units"))
 
-        # Clean up global binds when popup closes
         def _on_popup_destroy(event):
             if event.widget == popup:
                 try:

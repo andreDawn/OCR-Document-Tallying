@@ -39,6 +39,7 @@ def extract_from_jpegs(
     master_db_excerpt: str,
     use_thai: bool = False,
     status_callback: Callable[[str], None] | None = None,
+    has_declaration: bool = False, # <--- NEW PARAMETER
 ) -> str:
     """Upload JPEGs to Gemini Vision with jittered retry and dynamic self-healing cascade."""
     if not jpeg_paths:
@@ -73,6 +74,12 @@ def extract_from_jpegs(
             master_db_name=MASTER_DB_SOURCE_NAME,
             master_db_excerpt=master_db_excerpt,
         )
+        
+        # --- NEW LOGIC: Append declaration rule if checkbox was ticked ---
+        active_system_instruction = SYSTEM_INSTRUCTION
+        if has_declaration:
+            active_system_instruction += "\n- DECLARATION FORMS: If processing a Declaration Form, extract the INVOICE DATE and INVOICE REFERENCE NUMBER instead of the form's own internal reference number."
+        # ------------------------------------------------------------------
 
         cascade_errors: list[str] = []
         attempt_models = list(MODEL_CASCADE)
@@ -95,7 +102,7 @@ def extract_from_jpegs(
                         model=model_name,
                         contents=[prompt, *uploaded_files],
                         config=types.GenerateContentConfig(
-                            system_instruction=SYSTEM_INSTRUCTION,
+                            system_instruction=active_system_instruction, # <--- USE THE ACTIVE INSTRUCTION
                             response_mime_type="application/json",
                             temperature=0.1,
                             top_p=0.95,
@@ -103,6 +110,12 @@ def extract_from_jpegs(
                         ),
                     )
                     text = (getattr(response, "text", None) or "").strip()
+                    
+                    print("\n" + "="*40)
+                    print("RAW GEMINI OUTPUT:")
+                    print(text)
+                    print("="*40 + "\n")
+                    
                     if not text:
                         raise RuntimeError(f"{model_name} returned an empty response.")
                     return text
