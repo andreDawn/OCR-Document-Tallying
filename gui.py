@@ -7,6 +7,7 @@ import re
 import sys
 import threading
 import traceback
+import difflib
 from datetime import datetime
 from pathlib import Path
 from tkinter import BooleanVar, StringVar, filedialog, messagebox, ttk
@@ -68,35 +69,6 @@ FIELD_DEFINITIONS = [
      "18. Port of Discharge (POD)", "18. ท่าเรือปลายทาง (Port of Discharge - POD)"),
 ]
 
-SUMMARY_PATTERNS = {
-    "shipper_address":   r"(shipper|exporter).*addr|ที่อยู่.*ผู้ส่ง",
-    "shipper_name":      r"((shipper|exporter)(?!.*addr)|(ผู้ส่ง(?!.*ที่อยู่)))",
-    "consignee_address": r"consignee.*addr|ที่อยู่.*ผู้รับ",
-    "consignee_name":    r"consignee(?!.*addr)|ผู้รับ(?!.*(ที่อยู่|แจ้ง))",
-    "notify":            r"notify|ผู้รับแจ้ง",
-    "document":          r"doc|reference|invoice|เลขที่|อ้างอิง",
-    "date":              r"\bdate\b|วันที่",
-    "description":       r"desc|goods|สินค้า",
-    "quantity":          r"quant|pack|จำนวน|หีบห่อ|ชิ้น|กล่อง|พาเลท",
-    "net_weight":        r"net\s*weight|\bnw\b|น้ำหนักสุทธิ",
-    "gross_weight":      r"gross\s*weight|\bgw\b|น้ำหนักรวม",
-    "volume":            r"volume|cbm|ปริมาตร",
-    "hs_code":           r"hs\s*code|พิกัด|รหัส\s*hs",
-    "price":             r"price|amount|ราคา|ยอดรวม",
-    "marks":             r"marks?|เครื่องหมาย",
-    "vessel":            r"vessel|voyage|flight|เรือ|เที่ยวบิน",
-    "pol":               r"loading|\bpol\b|ต้นทาง|บรรทุก",
-    "pod":               r"discharge|\bpod\b|destination|ปลายทาง",
-}
-
-DOC_PATTERNS = {
-    "ci": r"\b(ci|commercial\s+invoice)\b|ใบกำกับสินค้า",
-    "pl": r"\b(pl|packing\s+list)\b|รายการบรรจุ",
-    "bl": r"\b(bl|b/?l|bill\s+of\s+lading)\b|ใบตราส่ง",
-    "co": r"\b(co|c/?o|certificate\s+of\s+origin)\b|หนังสือรับรองถิ่นกำเนิด|ใบรับรองถิ่นกำเนิด",
-    "master_db": r"\b(master\s+db|database)\b|ฐานข้อมูล",
-}
-
 UI_TEXT = {
     "en": {
         "app_title": "Logistics PDF Auditor - Dawn Shipping (Thailand)",
@@ -145,6 +117,8 @@ UI_TEXT = {
         "summary_title": " Discrepancy Summary & Notes ",
         "no_discrepancy": "All checked data points match.",
         "watermark_label": "⚠️ Watermark Warning:",
+        "co_prompt_title": "Declaration Form / CO",
+        "co_prompt_msg": "Does this document batch include a Certificate of Origin (CO) or Declaration Form?",
     },
     "th": {
         "app_title": "ระบบตรวจสอบเอกสารโลจิสติกส์ - Dawn Shipping (Thailand)",
@@ -193,47 +167,40 @@ UI_TEXT = {
         "summary_title": " สรุปข้อขัดแย้งและบันทึกเพิ่มเติม (Discrepancy Summary) ",
         "no_discrepancy": "ข้อมูลตรงกันทุกรายการ ไม่พบข้อขัดแย้ง",
         "watermark_label": "⚠️ คำเตือนลายน้ำ:",
+        "co_prompt_title": "เอกสารยืนยันถิ่นกำเนิดสินค้า (CO)",
+        "co_prompt_msg": "ชุดเอกสารนี้มีใบรับรองถิ่นกำเนิดสินค้า (CO) หรือฟอร์มประกาศ (Declaration Form) รวมอยู่ด้วยหรือไม่?",
     },
 }
 
-
 def parse_audit_json(raw: str) -> dict:
-  """Robust JSON extractor supporting unescaped control characters, trailing commas, and markdown fences."""
   if not raw or not raw.strip():
     return {}
 
   clean = raw.strip()
-
-  # Strip markdown fences
   clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.MULTILINE)
   clean = re.sub(r"\s*```$", "", clean, flags=re.MULTILINE).strip()
 
-  # Extract outer JSON boundaries
   m = re.search(r"\{[\s\S]*\}", clean)
   if m:
     clean = m.group(0)
 
-  # 1. Parse with strict=False (permits unescaped newlines/tabs inside strings)
   try:
     return json.loads(clean, strict=False)
   except Exception:
     pass
 
-  # 2. Strip trailing commas before closing braces/brackets
   clean_no_trailing = re.sub(r",\s*([\}\]])", r"\1", clean)
   try:
     return json.loads(clean_no_trailing, strict=False)
   except Exception:
     pass
 
-  # 3. Clean unescaped backslashes
   try:
     return json.loads(clean_no_trailing.replace("\\", "\\\\"), strict=False)
   except Exception:
     pass
 
   return {}
-
 
 def _get_about_text(lang: str) -> str:
     ver = get_current_version()
@@ -253,7 +220,6 @@ def _get_about_text(lang: str) -> str:
         "Internal Company Property • Unauthorized distribution strictly prohibited."
     )
 
-
 def get_field_info(raw_field: str) -> tuple[str, str, str]:
     rf = raw_field.lower()
     for key, pat, en_lbl, th_lbl in FIELD_DEFINITIONS:
@@ -265,239 +231,135 @@ def get_field_info(raw_field: str) -> tuple[str, str, str]:
             return key, en_lbl, th_lbl
     return "unknown", raw_field, raw_field
 
-
-def normalize_company_name(name: str) -> str:
-    n = name.upper()
-    n = re.sub(r"[^\w\s]", " ", n)
-    n = re.sub(r"\b(CO|LTD|COMPANY|LIMITED|CORPORATION|CORP|INC)\b", "", n)
-    return " ".join(n.split())
-
-
-def normalize_weight_to_kg(text: str) -> float | None:
-    """Extract weight value and convert MT / Metric Tons to KG for equal comparison."""
-    clean = text.upper().replace(",", "").strip()
-    m = re.search(r"[-+]?\d*\.?\d+", clean)
-    if not m:
-        return None
-    try:
-        val = float(m.group())
-    except ValueError:
-        return None
-
-    if re.search(r"\b(MT|M/T|METRIC\s*TONS?|TONS?)\b", clean):
-        val *= 1000.0
-
-    return round(val, 2)
-
-
-def extract_numeric(text: str) -> float | None:
-    m = re.search(r"[-+]?\d*\.?\d+", text)
-    if m:
-        try:
-            return float(m.group())
-        except ValueError:
-            return None
-    return None
-
-
-def run_deterministic_audit(rows: list[dict]) -> tuple[list[str], list[str]]:
-    """Directly inspect cells for typos, weight (MT/KG), and volume mismatches."""
-    added_en: list[str] = []
-    added_th: list[str] = []
-
-    for row in rows:
-        field = str(row.get("field", ""))
-        f_lower = field.lower()
-
-        if "reference" in f_lower or "document /" in f_lower or "invoice no" in f_lower or "date" in f_lower:
-            continue
-
-        doc_vals = {col: str(row.get(col, "-")).strip() for col in ["ci", "pl", "bl", "co"]}
-        active_vals = {col: v for col, v in doc_vals.items() if v and v != "-" and "blank" not in v.lower()}
-
-        if len(active_vals) <= 1:
-            continue
-
-        # Shipper / Exporter Name Check
-        if ("shipper" in f_lower or "exporter" in f_lower) and "name" in f_lower:
-            norms = {c: normalize_company_name(v) for c, v in active_vals.items()}
-            if len(set(norms.values())) > 1:
-                for c in active_vals:
-                    val = str(row.get(c, "")).strip()
-                    if val and not val.startswith("⚠️"):
-                        row[c] = f"⚠️ {val}"
-                diff_desc = " / ".join(f"{c.upper()}: {active_vals[c]}" for c in active_vals)
-                added_en.append(f"Typographical error/mismatch in Shipper Name across documents ({diff_desc}).")
-                added_th.append(f"พบการสะกดชื่อผู้ส่งสินค้าไม่ตรงกันระหว่างเอกสาร ({diff_desc})")
-
-        # Gross Weight Check across PL, BL, CO with MT -> KG conversion
-        elif "gross weight" in f_lower or "gw" in f_lower:
-            gw_docs = {c: v for c, v in active_vals.items() if c in ["pl", "bl", "co"]}
-            num_map = {c: normalize_weight_to_kg(v) for c, v in gw_docs.items() if normalize_weight_to_kg(v) is not None}
-            vals = list(num_map.values())
-            if len(vals) > 1 and (max(vals) - min(vals)) > 0.5:
-                for c in gw_docs:
-                    val = str(row.get(c, "")).strip()
-                    if val and not val.startswith("⚠️"):
-                        row[c] = f"⚠️ {val}"
-                diff_desc = " vs ".join(f"{c.upper()} ({gw_docs[c]})" for c in gw_docs)
-                added_en.append(f"Gross Weight mismatch between documents: {diff_desc}.")
-                added_th.append(f"น้ำหนักรวม (Gross Weight) ไม่ตรงกันระหว่างเอกสาร: {diff_desc}")
-
-        # Volume Check across PL, BL
-        elif "volume" in f_lower or "cbm" in f_lower:
-            vol_docs = {c: v for c, v in active_vals.items() if c in ["pl", "bl"]}
-            num_map = {c: extract_numeric(v.replace(",", "")) for c, v in vol_docs.items() if extract_numeric(v.replace(",", "")) is not None}
-            vals = list(num_map.values())
-            if len(vals) > 1 and (max(vals) - min(vals)) > 0.01:
-                for c in vol_docs:
-                    val = str(row.get(c, "")).strip()
-                    if val and not val.startswith("⚠️"):
-                        row[c] = f"⚠️ {val}"
-                diff_desc = " vs ".join(f"{c.upper()} ({vol_docs[c]})" for c in vol_docs)
-                added_en.append(f"Volume (CBM) mismatch: {diff_desc}.")
-                added_th.append(f"ปริมาตรสินค้า (Volume) ไม่ตรงกัน: {diff_desc}")
-
-        # Consignee Name Check (with To-Order L/C validation)
-        elif "consignee" in f_lower and "name" in f_lower:
-            bl_consignee = active_vals.get("bl", "").upper()
-            ci_consignee = active_vals.get("ci", "").upper()
-
-            # If BL is "TO ORDER OF [BANK]", verify buyer is named in Notify Party
-            if "TO THE ORDER OF" in bl_consignee or "TO ORDER" in bl_consignee:
-                # Find Notify Party row
-                notify_row = next(
-                    (r for r in rows if "notify" in str(r.get("field", "")).lower()),
-                    None,
-                )
-                bl_notify = (
-                    str(notify_row.get("bl", "")).upper() if notify_row else ""
-                )
-
-                # Check if the CI/PL buyer is listed in the BL Notify Party
-                norm_buyer = normalize_company_name(ci_consignee)
-                if norm_buyer and norm_buyer in normalize_company_name(
-                    bl_notify
-                ):
-                    pass  # Legitimate L/C structure; no flag
-                else:
-                    for c in ["bl"]:
-                        val = str(row.get(c, "")).strip()
-                        if val and not val.startswith("⚠️"):
-                            row[c] = f"⚠️ {val}"
-                    added_en.append(
-                        f"B/L Consigned 'To Order' of Bank ({active_vals.get('bl')}), but buyer is missing in B/L Notify Party."
-                    )
-                    added_th.append(
-                        f"B/L สั่งจ่ายตามคำสั่งธนาคาร แต่ไม่พบชื่อผู้ซื้อในช่อง Notify Party"
-                    )
-            else:
-                norms = {
-                    c: normalize_company_name(v)
-                    for c, v in active_vals.items()
-                    if c != "master_db"
-                }
-                if len(set(norms.values())) > 1:
-                    for c in active_vals:
-                        val = str(row.get(c, "")).strip()
-                        if val and not val.startswith("⚠️"):
-                            row[c] = f"⚠️ {val}"
-                    diff_desc = " / ".join(
-                        f"{c.upper()}: {active_vals[c]}" for c in active_vals
-                    )
-                    added_en.append(
-                        f"Consignee Name mismatch across documents ({diff_desc})."
-                    )
-                    added_th.append(
-                        f"ชื่อผู้รับตราส่ง (Consignee) ไม่ตรงกันระหว่างเอกสาร ({diff_desc})"
-                    )
-
-        # Description of Goods Specification / Dimension Check
-        elif "description" in f_lower or "goods" in f_lower:
-            # Check for specification dimension mismatches like "850" vs "860"
-            for col, val in active_vals.items():
-                if "311" not in val and any(
-                    "311" in other for other in active_vals.values()
-                ):
-                    row[col] = (
-                        f"⚠️ {val}"
-                        if not str(val).startswith("⚠️")
-                        else str(val)
-                    )
-                    added_en.append(
-                        f"Description grade mismatch: '{val}' missing specification '311' found on other documents."
-                    )
-                    added_th.append(
-                        f"รายละเอียดสินค้าขาดข้อกำหนด '311' เมื่อเทียบกับเอกสารอื่น"
-                    )
-
-    return added_en, added_th
-
-
 def reconcile_discrepancies(data: dict) -> dict:
     rows = data.get("audit_table", [])
-    
-    # 1. Clean old tags
-    for row in rows:
-        for col in ["ci", "pl", "bl", "co", "master_db"]:
-            val = str(row.get(col, "")).strip()
-            if val.startswith("⚠️"):
-                row[col] = re.sub(r"^⚠️\s*", "", val)
 
-    raw_en = data.get("discrepancy_summary_en") or data.get("discrepancy_summary", [])
-    summaries = raw_en if isinstance(raw_en, list) else ([raw_en] if raw_en else [])
-    summary_text = " ".join(summaries).upper()
+    def extract_entity_root(name: str) -> str:
+        """Strips out corporate suffixes and punctuation to compare only the core business name."""
+        t = str(name).upper()
+        t = re.sub(r'\b(PUBLIC\s+COMPANY\s+LIMITED|COMPANY\s+LIMITED|CO\s*,\s*LTD|CO\s+LTD|LTD|COMPANY|CORP|INC|PCL|LLC)\b\.?', ' ', t)
+        t = re.sub(r'[^\w\s]', ' ', t)
+        return re.sub(r'\s+', ' ', t).strip()
+
+    def norm_address(text: str) -> str:
+        """Normalizes address abbreviations, comma spacing, and trailing punctuation."""
+        t = str(text).upper()
+        t = re.sub(r'\bRD\b\.?', 'ROAD', t)
+        t = re.sub(r'\bM\b\.?', 'MOO', t)
+        t = re.sub(r'\bCO\b\.?', 'COMPANY', t)
+        t = re.sub(r'\bLTD\b\.?', 'LIMITED', t)
+        t = re.sub(r'[^\w\s]', ' ', t)
+        return re.sub(r'\s+', ' ', t).strip()
+
+    def parse_standard_dates(text: str) -> set[str]:
+        found = set()
+        t = str(text).upper()
+        months = {'JAN': '01', 'FEB': '02', 'MAR': '03', 'APR': '04', 'MAY': '05', 'JUN': '06',
+                  'JUL': '07', 'AUG': '08', 'SEP': '09', 'OCT': '10', 'NOV': '11', 'DEC': '12'}
+        for m in re.finditer(r'\b(20\d{2})[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12]\d|3[01])\b', t):
+            found.add(f"{m.group(1)}{int(m.group(2)):02d}{int(m.group(3)):02d}")
+        for m in re.finditer(r'\b(0?[1-9]|[12]\d|3[01])[-/](0?[1-9]|1[0-2])[-/](20\d{2})\b', t):
+            found.add(f"{m.group(3)}{int(m.group(2)):02d}{int(m.group(1)):02d}")
+        for m in re.finditer(r'\b(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\.?\s*(0?[1-9]|[12]\d|3[01])\,?\s*(20\d{2})\b', t):
+            found.add(f"{m.group(3)}{months[m.group(1)]}{int(m.group(2)):02d}")
+        for m in re.finditer(r'\b(0?[1-9]|[12]\d|3[01])\s+(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)[A-Z]*\.?\,?\s*(20\d{2})\b', t):
+            found.add(f"{m.group(3)}{months[m.group(2)]}{int(m.group(1)):02d}")
+        return found
+
+    ci_dates = set()
+    for row in rows:
+        if "date" in str(row.get("field", "")).lower():
+            ci_dates = parse_standard_dates(str(row.get("ci", "")))
+            break
 
     for row in rows:
-        fname = str(row.get("field", ""))
-        key, _, _ = get_field_info(fname)
-        
-        # --- 1. STRICT MASTER DB CHECK (Python handles Consignee truth) ---
-        master_val = str(row.get("master_db", "")).strip()
-        if master_val and master_val != "-":
-            for col in ["ci", "pl", "bl", "co"]:
-                val = str(row.get(col, "")).strip()
-                if val and val != "-":
-                    # Flag if it doesn't perfectly match the Master DB
-                    if val.upper() != master_val.upper():
-                        row[col] = f"⚠️ {val}"
-            continue  # Skip AI checks for this row since Master DB is the absolute rule
+        fname = str(row.get("field", "")).lower()
+
+        # Hard Failsafe: Master DB should only display Consignee Info
+        if not ("consignee" in fname and "notify" not in fname):
+            row["master_db"] = "-"
+
+        # Hard Failsafe 2: Net Weight on BL/CO must always be blank
+        if "net weight" in fname:
+            for col in ["bl", "co"]:
+                if str(row.get(col, "")).strip() not in ["-", ""]:
+                    row[col] = "-"
+
+        # Hard Failsafe: Net Weight on BL/CO must always be blank
+        if "net weight" in fname:
+            for col in ["bl", "co"]:
+                if str(row.get(col, "")).strip() not in ["-", ""]:
+                    row[col] = "-"
+
+        # CONSIGNEE NAME (ROW 3) & ADDRESS (ROW 4)
+        if "consignee" in fname and "notify" not in fname:
+            master_val = str(row.get("master_db", "")).strip()
+            is_name_row = "name" in fname
             
-        # --- 2. AI-DRIVEN CHECK (AI handles weights, volumes, pkgs) ---
-        pat = SUMMARY_PATTERNS.get(key)
-        
-        # Only apply red flags if the AI explicitly noted a discrepancy in the summary
-        if pat and re.search(pat, summary_text, re.I):
-            ci_val = str(row.get("ci", "")).strip()
-            baseline = ci_val if ci_val and ci_val != "-" else "-"
-            
-            if baseline == "-":
-                for fb in ["pl", "bl", "co"]:
-                    fb_val = str(row.get(fb, "")).strip()
-                    if fb_val and fb_val != "-":
-                        baseline = fb_val
-                        break
-                        
-            base_clean = baseline.replace("(Invoice)", "").replace("(Native)", "").strip()
-            
-            for col in ["ci", "pl", "bl", "co"]:
-                val = str(row.get(col, "")).strip()
-                if not val or val == "-" or val.startswith("⚠️"):
-                    continue
-                    
-                val_clean = val.replace("(Invoice)", "").replace("(Native)", "").strip()
-                if val_clean == base_clean or base_clean in val_clean:
-                    continue
-                    
-                # Edge case: Missing invoice data on BL/CO
-                if "Document" in fname or "Date" in fname:
-                    if "- (Invoice)" in val or "NOT STATED" in val.upper():
+            if master_val and master_val.upper() not in ["-", "N/A", "NONE"]:
+                master_norm = extract_entity_root(master_val) if is_name_row else norm_address(master_val)
+
+                for col in ["ci", "pl", "bl", "co"]:
+                    val = str(row.get(col, "")).strip()
+                    if not val or val == "-":
                         continue
-                        
-                row[col] = f"⚠️ {val}"
 
+                    v_clean = re.sub(r"^[⚠️🔍]\s*", "", val)
+                    v_upper = v_clean.upper()
+
+                    # BL 'TO THE ORDER OF' rule -> Only flag this specific cell
+                    if "TO ORDER" in v_upper or "TO THE ORDER" in v_upper:
+                        if not val.startswith("🔍") and not val.startswith("⚠️"):
+                            row[col] = f"🔍 {v_clean}"
+                        continue
+
+                    # Compare normalized root against Master DB
+                    v_norm = extract_entity_root(v_clean) if is_name_row else norm_address(v_clean)
+                    
+                    if v_norm == master_norm:
+                        row[col] = v_clean  # Clean match: remove any accidental flag from AI
+                    else:
+                        if not val.startswith("🔍") and not val.startswith("⚠️"):
+                            row[col] = f"🔍 {v_clean}" # Genuine entity mismatch (CRAFTLAND vs CRAFT LAND)
+
+        # DOCUMENT DATE FAILSAFE (ROW 7)
+        if "date" in fname and ci_dates:
+            for col in ["pl", "bl", "co"]:
+                val = str(row.get(col, "")).strip()
+                if not val or val == "-":
+                    continue
+                v_clean = re.sub(r"^[⚠️🔍]\s*", "", val)
+                
+                inv_match = re.search(r"^(.*?)\s*\(Invoice\)", v_clean)
+                check_str = inv_match.group(1) if inv_match else v_clean.replace("(Native)", "").strip()
+                
+                parsed = parse_standard_dates(check_str)
+                if parsed and not (parsed & ci_dates):
+                    if not val.startswith("⚠️"):
+                        row[col] = f"⚠️ {val}"
+                elif "- (Invoice)" in v_clean and not parsed:
+                    if not val.startswith("⚠️"):
+                        row[col] = f"⚠️ {val}"
+
+    # Generate discrepancy summary based on final flags
+    summaries = data.get("discrepancy_summary", [])
+    if not summaries or summaries == ["Match"]:
+        auto = []
+        for r in rows:
+            for c in ["ci", "pl", "bl", "co"]:
+                val = str(r.get(c, ""))
+                if "⚠️" in val:
+                    auto.append(f"{r.get('field', 'Field')}: Mismatch in {c.upper()}")
+                    break
+                elif "🔍" in val:
+                    auto.append(f"{r.get('field', 'Field')}: Review required in {c.upper()}")
+                    break
+        summaries = auto if auto else ["All checked data points match."]
+
+    data["discrepancy_summary"] = summaries
+    data["discrepancy_summary_en"] = summaries
+    data["discrepancy_summary_th"] = summaries
     return data
-
 
 class LogisticsAuditorApp:
     def __init__(self) -> None:
@@ -579,15 +441,6 @@ class LogisticsAuditorApp:
         )
         self.chk_thai.pack(side=tk.LEFT)
 
-        # Declaration Form Checkbox
-        self.has_declaration = BooleanVar(value=False)
-        self.decl_chk = ttk.Checkbutton(
-            options_row,
-            text="Includes Declaration Form",
-            variable=self.has_declaration,
-        )
-        self.decl_chk.pack(side=tk.LEFT, padx=(20, 0))
-
         ttk.Label(
             frame,
             textvariable=self.status,
@@ -603,7 +456,6 @@ class LogisticsAuditorApp:
         )
         self.footer_label.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
 
-        # Progress Bar
         self.progress = ttk.Progressbar(frame, mode="indeterminate")
         self.progress.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, 10))
 
@@ -641,11 +493,10 @@ class LogisticsAuditorApp:
 
     def _show_api_settings(self) -> None:
         from gemini_client import get_saved_api_key, save_api_key, validate_api_key
-        import threading
         
         modal = tk.Toplevel(self.root)
         modal.title("API Key Settings")
-        modal.geometry("450x230")  # Increased height slightly to prevent clipping
+        modal.geometry("450x230") 
         modal.resizable(False, False)
         modal.grab_set()
 
@@ -655,7 +506,6 @@ class LogisticsAuditorApp:
         entry = ttk.Entry(modal, textvariable=key_var, show="*", width=50)
         entry.pack(pady=5)
 
-        # The status label that was missing
         status_lbl = ttk.Label(modal, text="", font=("Segoe UI", 9))
         status_lbl.pack(pady=5)
 
@@ -680,7 +530,6 @@ class LogisticsAuditorApp:
                 
             threading.Thread(target=_check_key, daemon=True).start()
 
-        # The button that was missing
         btn = ttk.Button(modal, text="Verify & Save", command=verify_and_save)
         btn.pack(pady=10)
 
@@ -728,7 +577,6 @@ class LogisticsAuditorApp:
                     self._busy = False
                     self.progress.stop()
                     
-                    # --- NEW: Catch Auth Errors and pop the modal ---
                     if "NO_API_KEY" in err_msg or "401" in err_msg or "403" in err_msg:
                         self.status.set("Authentication failed. Please check API Key.")
                         self._show_api_settings()
@@ -767,7 +615,6 @@ class LogisticsAuditorApp:
             filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
         )
         if filenames:
-            # STRICT FILTER: Only take PDFs and sort them so the order is always consistent
             pdfs = [Path(name) for name in filenames if name.lower().endswith(".pdf")]
             pdfs.sort()
             
@@ -870,18 +717,24 @@ class LogisticsAuditorApp:
         if self._busy:
             messagebox.showinfo(self._t("busy_title", lang), self._t("busy_msg", lang))
             return
+            
+        has_co = messagebox.askyesno(
+            self._t("co_prompt_title", lang),
+            self._t("co_prompt_msg", lang),
+            parent=self.root
+        )
+
         self._busy = True
-        threading.Thread(target=self._run_jobs, args=(pdf_paths,), daemon=True).start()
+        threading.Thread(target=self._run_jobs, args=(pdf_paths, has_co), daemon=True).start()
 
     def _set_status(self, message: str) -> None:
         self.root.after(0, lambda: self.status.set(message))
 
-    def _run_jobs(self, pdf_paths: list[Path]) -> None:
+    def _run_jobs(self, pdf_paths: list[Path], has_declaration: bool) -> None:
         errors: list[str] = []
         saved: list[Path] = []
         lang = "th" if self.use_thai.get() else "en"
         
-        # Start the loading bar
         self.root.after(0, lambda: self.progress.start(15))
         
         try:
@@ -895,18 +748,15 @@ class LogisticsAuditorApp:
 
             self._set_status(self._t("status_upload", lang).format(count=len(all_jpegs)))
 
-            # Check if user flagged Declaration Form
-            is_decl = self.has_declaration.get()
-
             result_str = extract_from_jpegs(
                 pdf_path=pdf_paths[0],
                 jpeg_paths=all_jpegs,
                 master_db_excerpt=master_excerpt,
                 use_thai=False,
                 status_callback=self._set_status,
-                has_declaration=is_decl # Ensure you update extract_from_jpegs signature in main.py to accept this!
+                has_declaration=has_declaration
             )
-
+            
             report_name = self._generate_report_name(result_str)
             report_path = Path(report_name)
             out_dir = job_output_dir(report_path)
@@ -919,7 +769,7 @@ class LogisticsAuditorApp:
 
             def finish() -> None:
                 self._busy = False
-                self.progress.stop() # Stop loading bar
+                self.progress.stop()
                 if saved and not errors:
                     self.status.set(self._t("status_success", lang).format(name=report_name))
                 elif errors:
@@ -934,7 +784,7 @@ class LogisticsAuditorApp:
 
             def fail() -> None:
                 self._busy = False
-                self.progress.stop() # Stop loading bar on error
+                self.progress.stop()
                 self.status.set(f"Error: {err_msg}")
                 messagebox.showerror("Error", err_msg)
 
@@ -959,12 +809,10 @@ class LogisticsAuditorApp:
         data = reconcile_discrepancies(data)
         rows = data.get("audit_table", [])
 
-        # Define localized, standout tags
         is_thai = self.use_thai.get()
         tag_inv = "【 ใบแจ้งหนี้ 】" if is_thai else "【 INVOICE 】"
         tag_nat = "【 ต้นฉบับ 】" if is_thai else "【 NATIVE 】"
         
-        # --- Inside your existing table row loop ---
         for row_idx, item in enumerate(rows):
             raw_field = str(item.get("field", "-"))
             cells = [
@@ -976,14 +824,12 @@ class LogisticsAuditorApp:
                 str(item.get("master_db", "-")),
             ]
 
-            # NEW: Replace the AI's standard English tags with our localized UI tags
             for i in range(1, 6):
                 if "(Invoice)" in cells[i]:
                     cells[i] = cells[i].replace("(Invoice)", tag_inv)
                 if "(Native)" in cells[i]:
                     cells[i] = cells[i].replace("(Native)", tag_nat)
 
-        # 1. Top Header Bar
         top_bar = ttk.Frame(popup, padding=(14, 8, 14, 4))
         top_bar.pack(side=tk.TOP, fill=tk.X, expand=False)
 
@@ -993,7 +839,6 @@ class LogisticsAuditorApp:
         lang_chk = ttk.Checkbutton(top_bar, variable=popup_lang)
         lang_chk.pack(side=tk.RIGHT)
 
-        # 2. Bottom Summary Frame (Packed FIRST at BOTTOM so it never clips off-screen)
         bottom_frame = ttk.LabelFrame(popup, padding=10)
         bottom_frame.pack(
             side=tk.BOTTOM, fill=tk.X, expand=False, padx=12, pady=(4, 10)
@@ -1015,8 +860,6 @@ class LogisticsAuditorApp:
         summary_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         summary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # 3. Main Table Canvas (Takes all remaining middle space)
-        # 3. Main Table Canvas (Takes all remaining middle space)
         table_frame = ttk.Frame(popup, padding=(12, 4, 12, 4))
         table_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
@@ -1029,19 +872,16 @@ class LogisticsAuditorApp:
         inner_frame = tk.Frame(table_frame)
         inner_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # STICKY HEADER CANVAS
         header_canvas = tk.Canvas(inner_frame, bg="#cbd5e1", highlightthickness=0, height=45)
         header_canvas.pack(side=tk.TOP, fill=tk.X)
         header_container = tk.Frame(header_canvas, bg="#cbd5e1")
         header_window = header_canvas.create_window((0, 0), window=header_container, anchor="nw")
 
-        # MAIN ROWS CANVAS
         canvas = tk.Canvas(inner_frame, bg="#f1f5f9", highlightthickness=0)
         canvas.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         grid_container = tk.Frame(canvas, bg="#cbd5e1")
         canvas_window = canvas.create_window((0, 0), window=grid_container, anchor="nw")
 
-        # Link scrollbars
         def _on_h_scroll(*args):
             canvas.xview(*args)
             header_canvas.xview(*args)
@@ -1051,7 +891,6 @@ class LogisticsAuditorApp:
         canvas.config(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
         header_canvas.config(xscrollcommand=h_scroll.set)
 
-        # Proportional weights across 6 columns
         col_weights = [18, 16, 16, 18, 18, 14]
         for col_idx, weight in enumerate(col_weights):
             header_container.grid_columnconfigure(col_idx, weight=weight, minsize=170)
@@ -1063,7 +902,6 @@ class LogisticsAuditorApp:
         base_width = 1300
         initial_wraps = [max(int(w * base_width / 100) - 22, 140) for w in col_weights]
 
-        # Column Headers (Now packed into header_container)
         for col_idx in range(6):
             hdr = tk.Label(
                 header_container,
@@ -1083,7 +921,6 @@ class LogisticsAuditorApp:
         rows = data.get("audit_table", [])
         row_field_widgets: list[tuple[tk.Label, str]] = []
 
-        # Table Rows (Packed into grid_container, starting at row_idx=0 since headers moved)
         for row_idx, item in enumerate(rows):
             raw_field = str(item.get("field", "-"))
             cells = [
@@ -1102,18 +939,14 @@ class LogisticsAuditorApp:
                 is_manual_review = ("🔍" in cell_val if col_idx > 0 else False)
 
                 if is_severe:
-                    # Red for severe discrepancies
                     bg_color, fg_color, font_style = "#fde8e8", "#991b1b", ("Segoe UI", 9, "bold")
                 elif is_manual_review:
-                    # Yellow/Orange for manual human review
                     bg_color, fg_color, font_style = "#fef08a", "#854d0e", ("Segoe UI", 9, "bold")
                 elif col_idx == 0:
-                    # Header column formatting
                     bg_color = "#f8fafc"
                     fg_color = "#991b1b" if (row_has_error or "🔍" in str(cells)) else "#0f172a"
                     font_style = ("Segoe UI", 9, "bold" if (row_has_error or "🔍" in str(cells)) else "normal")
                 else:
-                    # Green for perfect matches
                     bg_color, fg_color, font_style = "#dcfce7", "#166534", ("Segoe UI", 9)
 
                 cell_lbl = tk.Label(
@@ -1134,7 +967,6 @@ class LogisticsAuditorApp:
                 if col_idx == 0:
                     row_field_widgets.append((cell_lbl, raw_field))
 
-        # 4. Reliable Scrolling & Geometry Handlers
         def _update_scrollregion(event=None):
             canvas.configure(scrollregion=canvas.bbox("all"))
             header_canvas.configure(scrollregion=header_canvas.bbox("all"))
@@ -1168,7 +1000,6 @@ class LogisticsAuditorApp:
 
         canvas.bind("<Configure>", _on_canvas_configure)
 
-        # 5. Global Mouse Wheel & Keyboard Navigation
         def _on_mousewheel(event):
             try:
                 w = popup.winfo_containing(event.x_root, event.y_root)
@@ -1209,7 +1040,6 @@ class LogisticsAuditorApp:
 
         popup.bind("<Destroy>", _on_popup_destroy)
 
-        # 6. Bilingual Language Refresh Handler
         def refresh_popup_language():
             lang = "th" if popup_lang.get() else "en"
 

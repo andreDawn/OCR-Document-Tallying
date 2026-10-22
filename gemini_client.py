@@ -6,10 +6,55 @@ import random
 import time
 import json
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Literal
 
 from google import genai
 from google.genai import types
+from pydantic import BaseModel
+
+# Pydantic Schemas for Strict JSON Enforcement ---
+class RowData(BaseModel):
+    field: Literal[
+        "1. Shipper / Exporter Name",
+        "2. Shipper / Exporter Address",
+        "3. Consignee Name",
+        "4. Consignee Address",
+        "5. Notify Party Name & Address",
+        "6. Document / Reference No.",
+        "7. Document Date",
+        "8. Description of Goods",
+        "9. Quantity & Packages",
+        "10. Net Weight (NW)",
+        "11. Gross Weight (GW)",
+        "12. Volume (CBM)",
+        "13. HS Code",
+        "14. Unit Price & Total Amount",
+        "15. Shipping Marks",
+        "16. Vessel / Flight / Voyage No.",
+        "17. Port of Loading (POL)",
+        "18. Port of Discharge (POD)"
+    ]
+    ci: str
+    pl: str
+    bl: str
+    co: str
+    master_db: str
+    discrepancy_note: str 
+
+class SemanticValidation(BaseModel):
+    shipper_info_matches: bool
+    consignee_info_matches: bool
+    notify_party_matches: bool
+    description_is_valid_summary: bool
+
+class AuditResult(BaseModel):
+    watermark_warning: str
+    semantic_validation: SemanticValidation
+    audit_table: list[RowData]
+
+RowData.model_rebuild()
+SemanticValidation.model_rebuild()
+AuditResult.model_rebuild()
 
 from config import (
     MASTER_DB_SOURCE_NAME,
@@ -36,19 +81,12 @@ def save_api_key(api_key: str) -> None:
 
 def validate_api_key(api_key: str) -> bool:
     try:
-        # Add a strict 10-second timeout so it fails fast on bad Wi-Fi
         test_client = genai.Client(
             api_key=api_key,
             http_options=types.HttpOptions(timeout=10000) 
         )
-        
-        # Make a lightweight metadata request instead of a heavy text generation
-        # If the key is invalid or revoked, this immediately throws a 401/403.
         model_pager = test_client.models.list()
-        
-        # Fetch just the very first item to confirm the connection is active
         next(model_pager) 
-        
         return True
         
     except Exception as e:
@@ -78,7 +116,7 @@ def extract_from_jpegs(
     master_db_excerpt: str,
     use_thai: bool = False,
     status_callback: Callable[[str], None] | None = None,
-    has_declaration: bool = False, # <--- NEW PARAMETER
+    has_declaration: bool = False, 
 ) -> str:
     """Upload JPEGs to Gemini Vision with jittered retry and dynamic self-healing cascade."""
     if not jpeg_paths:
@@ -95,7 +133,6 @@ def extract_from_jpegs(
 
     uploaded_files = []
     try:
-        # 1. Upload page JPEGs
         for i, img_path in enumerate(jpeg_paths, start=1):
             if status_callback:
                 msg = (
@@ -114,16 +151,13 @@ def extract_from_jpegs(
             master_db_excerpt=master_db_excerpt,
         )
         
-        # --- NEW LOGIC: Append declaration rule if checkbox was ticked ---
         active_system_instruction = SYSTEM_INSTRUCTION
         if has_declaration:
             active_system_instruction += "\n- DECLARATION FORMS: If processing a Declaration Form, extract the INVOICE DATE and INVOICE REFERENCE NUMBER instead of the form's own internal reference number."
-        # ------------------------------------------------------------------
 
         cascade_errors: list[str] = []
         attempt_models = list(MODEL_CASCADE)
 
-        # 2. Iterate cascade with jittered exponential backoff
         for model_name in attempt_models:
             max_attempts = 2
             for attempt in range(max_attempts):
@@ -141,11 +175,12 @@ def extract_from_jpegs(
                         model=model_name,
                         contents=[prompt, *uploaded_files],
                         config=types.GenerateContentConfig(
-                            system_instruction=active_system_instruction, # <--- USE THE ACTIVE INSTRUCTION
+                            system_instruction=active_system_instruction, 
                             response_mime_type="application/json",
+                            response_schema=AuditResult,  # <--- ADD THIS LINE
                             temperature=0.1,
                             top_p=0.95,
-                            max_output_tokens=8192,
+                            # max_output_tokens=8192, # (Optional: Pro handles token limits natively)
                         ),
                     )
                     text = (getattr(response, "text", None) or "").strip()
@@ -161,8 +196,6 @@ def extract_from_jpegs(
 
                 except Exception as exc:
                     err_str = str(exc)
-
-                    # Transient demand spike or rate limit
                     is_transient = any(
                         token in err_str
                         for token in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED"]
@@ -191,7 +224,6 @@ def extract_from_jpegs(
                         status_callback(switch_msg)
                     break
 
-        # 3. Emergency Safety Net: Query live models if all preconfigured models failed
         live_fallbacks = [m for m in _get_live_fallback_models(client) if m not in attempt_models]
         for fallback_model in live_fallbacks:
             try:
@@ -202,11 +234,11 @@ def extract_from_jpegs(
                     model=fallback_model,
                     contents=[prompt, *uploaded_files],
                     config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTION,
+                        system_instruction=active_system_instruction,
                         response_mime_type="application/json",
+                        response_schema=AuditResult,  # <--- ADD THIS LINE
                         temperature=0.1,
                         top_p=0.95,
-                        max_output_tokens=8192,
                     ),
                 )
                 text = (getattr(response, "text", None) or "").strip()
